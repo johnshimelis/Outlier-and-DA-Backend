@@ -6,9 +6,8 @@ const Notification = require("../models/Notification");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
-const { parsePhoneNumber } = require('libphonenumber-js'); // More robust phone parsing
 
-// Email sending function (unchanged)
+// Email sending function
 const sendOTP = async (email, otp) => {
   const transporter = nodemailer.createTransport({
     service: process.env.EMAIL_SERVICE || 'gmail',
@@ -48,33 +47,22 @@ const sendOTP = async (email, otp) => {
   }
 };
 
-// Enhanced phone validation with country code support
+// Phone validation (simplified for your example format)
 const validatePhoneNumber = (phoneNumber) => {
   if (!phoneNumber) throw new Error("Phone number is required");
-
-  try {
-    const parsedNumber = parsePhoneNumber(phoneNumber.toString());
-    
-    if (!parsedNumber || !parsedNumber.isValid()) {
-      throw new Error("Invalid international phone number format");
-    }
-
-    // Get the national number (without country code)
-    const nationalNumber = parsedNumber.nationalNumber;
-    
-    // Validate local number length (9-10 digits)
-    if (nationalNumber.length < 9 || nationalNumber.length > 10) {
-      throw new Error("Local phone number must be 9-10 digits (after country code)");
-    }
-
-    // Return in E.164 format (+[country code][number])
-    return parsedNumber.format('E.164');
-  } catch (error) {
-    throw new Error(`Please provide a valid international phone number (e.g., +251912345678 or +11234567890). ${error.message}`);
+  
+  // Remove all non-digit characters
+  const cleaned = phoneNumber.toString().replace(/\D/g, '');
+  
+  // Check if phone number is 10 digits (for Ethiopian format)
+  if (!/^[0-9]{10}$/.test(cleaned)) {
+    throw new Error("Phone number must be 10 digits (e.g., 0967432143)");
   }
+  
+  return cleaned;
 };
 
-// Email validation (unchanged)
+// Email validation
 const validateEmail = (email) => {
   if (!email) throw new Error("Email is required");
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -82,7 +70,7 @@ const validateEmail = (email) => {
   }
 };
 
-// Password validation (unchanged)
+// Password validation
 const validatePassword = (password) => {
   if (!password) throw new Error("Password is required");
   if (password.length < 8) {
@@ -90,7 +78,7 @@ const validatePassword = (password) => {
   }
 };
 
-// Registration function with enhanced phone support
+// Registration function
 const registerUser = async (req, res) => {
   const { fullName, phoneNumber, email, password } = req.body;
 
@@ -102,7 +90,7 @@ const registerUser = async (req, res) => {
     validateEmail(email);
     validatePassword(password);
 
-    // Check if user exists (parallel queries)
+    // Check if user exists
     const [userExists, phoneExists] = await Promise.all([
       User.findOne({ email }),
       User.findOne({ phoneNumber: validatedPhone })
@@ -124,7 +112,7 @@ const registerUser = async (req, res) => {
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 12); // Stronger hashing
+    const hashedPassword = await bcrypt.hash(password, 10);
 
     const newUser = new User({
       fullName,
@@ -139,10 +127,12 @@ const registerUser = async (req, res) => {
       success: true,
       message: "User registered successfully",
       user: {
-        id: newUser._id,
+        _id: newUser._id,
         fullName: newUser.fullName,
         phoneNumber: newUser.phoneNumber,
-        email: newUser.email
+        email: newUser.email,
+        password: newUser.password, // Only for demonstration, remove in production
+        __v: newUser.__v
       }
     });
   } catch (error) {
@@ -156,7 +146,7 @@ const registerUser = async (req, res) => {
   }
 };
 
-// Login function (unchanged)
+// Login function
 const loginUser = async (req, res) => {
   const { email } = req.body;
 
@@ -173,19 +163,31 @@ const loginUser = async (req, res) => {
       });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000);
-    const otpExpiry = Date.now() + 10 * 60 * 1000; // 10 minutes
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
 
-    user.otp = otp;
-    user.otpExpiry = otpExpiry;
-    await user.save();
+    // Update user with OTP details
+    const updatedUser = await User.findByIdAndUpdate(
+      user._id,
+      { 
+        $set: { 
+          otp: otp,
+          otpExpiry: otpExpiry 
+        } 
+      },
+      { new: true }
+    );
 
     await sendOTP(email, otp);
 
     res.status(200).json({ 
       success: true,
       message: "OTP sent to your email",
-      email: email
+      email: email,
+      otpDetails: {
+        otp: updatedUser.otp,
+        otpExpiry: updatedUser.otpExpiry
+      }
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -197,7 +199,7 @@ const loginUser = async (req, res) => {
   }
 };
 
-// OTP Verification function (unchanged)
+// OTP Verification function
 const verifyOTP = async (req, res) => {
   const { email, otp } = req.body;
 
@@ -223,7 +225,7 @@ const verifyOTP = async (req, res) => {
       });
     }
 
-    if (Date.now() > user.otpExpiry) {
+    if (new Date() > new Date(user.otpExpiry)) {
       return res.status(400).json({ 
         success: false,
         message: "OTP expired. Please request a new one.",
@@ -238,14 +240,7 @@ const verifyOTP = async (req, res) => {
       { expiresIn: "365d" }
     );
 
-    // Fetch user data in parallel
-    const [orders, messages, notifications] = await Promise.all([
-      UserOrder.find({ userId: user._id }).select('date status total'),
-      Message.find({ userId: user._id }).select('from message read date'),
-      Notification.find({ userId: user._id }).select('message date')
-    ]);
-
-    // Clear OTP
+    // Clear OTP fields after successful verification
     user.otp = undefined;
     user.otpExpiry = undefined;
     await user.save();
@@ -255,14 +250,12 @@ const verifyOTP = async (req, res) => {
       message: "Login successful",
       token,
       user: {
-        id: user._id,
+        _id: user._id,
         fullName: user.fullName,
         phoneNumber: user.phoneNumber,
         email: user.email,
-        orders,
-        messages,
-        notifications,
-      },
+        __v: user.__v
+      }
     });
   } catch (error) {
     console.error("OTP verification error:", error);
