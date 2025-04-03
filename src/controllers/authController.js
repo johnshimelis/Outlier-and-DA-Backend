@@ -6,6 +6,7 @@ const Notification = require("../models/Notification");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
+const { parsePhoneNumber } = require('libphonenumber-js'); // More robust phone parsing
 
 // Email sending function (unchanged)
 const sendOTP = async (email, otp) => {
@@ -47,21 +48,33 @@ const sendOTP = async (email, otp) => {
   }
 };
 
-// Validation functions
+// Enhanced phone validation with country code support
 const validatePhoneNumber = (phoneNumber) => {
   if (!phoneNumber) throw new Error("Phone number is required");
-  
-  // Remove all non-digit characters
-  const cleaned = phoneNumber.toString().replace(/\D/g, '');
-  
-  // Check if phone number is 9 or 10 digits
-  if (!/^[0-9]{9,10}$/.test(cleaned)) {
-    throw new Error("Phone number must be 9 or 10 digits (e.g., 912345678 or 0912345678)");
+
+  try {
+    const parsedNumber = parsePhoneNumber(phoneNumber.toString());
+    
+    if (!parsedNumber || !parsedNumber.isValid()) {
+      throw new Error("Invalid international phone number format");
+    }
+
+    // Get the national number (without country code)
+    const nationalNumber = parsedNumber.nationalNumber;
+    
+    // Validate local number length (9-10 digits)
+    if (nationalNumber.length < 9 || nationalNumber.length > 10) {
+      throw new Error("Local phone number must be 9-10 digits (after country code)");
+    }
+
+    // Return in E.164 format (+[country code][number])
+    return parsedNumber.format('E.164');
+  } catch (error) {
+    throw new Error(`Please provide a valid international phone number (e.g., +251912345678 or +11234567890). ${error.message}`);
   }
-  
-  return cleaned;
 };
 
+// Email validation (unchanged)
 const validateEmail = (email) => {
   if (!email) throw new Error("Email is required");
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -69,6 +82,7 @@ const validateEmail = (email) => {
   }
 };
 
+// Password validation (unchanged)
 const validatePassword = (password) => {
   if (!password) throw new Error("Password is required");
   if (password.length < 8) {
@@ -76,7 +90,7 @@ const validatePassword = (password) => {
   }
 };
 
-// Registration function
+// Registration function with enhanced phone support
 const registerUser = async (req, res) => {
   const { fullName, phoneNumber, email, password } = req.body;
 
@@ -88,7 +102,7 @@ const registerUser = async (req, res) => {
     validateEmail(email);
     validatePassword(password);
 
-    // Check if user exists
+    // Check if user exists (parallel queries)
     const [userExists, phoneExists] = await Promise.all([
       User.findOne({ email }),
       User.findOne({ phoneNumber: validatedPhone })
@@ -97,18 +111,20 @@ const registerUser = async (req, res) => {
     if (userExists) {
       return res.status(400).json({ 
         success: false,
-        message: "User already exists with this email" 
+        message: "User already exists with this email",
+        code: "EMAIL_EXISTS"
       });
     }
 
     if (phoneExists) {
       return res.status(400).json({ 
         success: false,
-        message: "User already exists with this phone number" 
+        message: "User already exists with this phone number",
+        code: "PHONE_EXISTS"
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12); // Stronger hashing
 
     const newUser = new User({
       fullName,
@@ -130,16 +146,17 @@ const registerUser = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Error registering user:", error);
+    console.error("Registration error:", error);
     res.status(400).json({ 
       success: false,
       message: error.message || "Registration failed",
+      code: "VALIDATION_ERROR",
       error: error.message
     });
   }
 };
 
-// Login function
+// Login function (unchanged)
 const loginUser = async (req, res) => {
   const { email } = req.body;
 
@@ -149,9 +166,10 @@ const loginUser = async (req, res) => {
 
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(400).json({ 
+      return res.status(404).json({ 
         success: false,
-        message: "User not found. Please register first." 
+        message: "Account not found. Please register first.",
+        code: "USER_NOT_FOUND"
       });
     }
 
@@ -170,16 +188,16 @@ const loginUser = async (req, res) => {
       email: email
     });
   } catch (error) {
-    console.error("Error logging in user:", error);
+    console.error("Login error:", error);
     res.status(400).json({ 
       success: false,
       message: error.message || "Login failed",
-      error: error.message
+      code: "LOGIN_ERROR"
     });
   }
 };
 
-// OTP Verification function
+// OTP Verification function (unchanged)
 const verifyOTP = async (req, res) => {
   const { email, otp } = req.body;
 
@@ -190,30 +208,35 @@ const verifyOTP = async (req, res) => {
 
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(400).json({ 
+      return res.status(404).json({ 
         success: false,
-        message: "User not found" 
+        message: "User not found",
+        code: "USER_NOT_FOUND"
       });
     }
 
     if (user.otp !== otp) {
       return res.status(400).json({ 
         success: false,
-        message: "Invalid OTP code" 
+        message: "Invalid OTP code",
+        code: "INVALID_OTP"
       });
     }
 
     if (Date.now() > user.otpExpiry) {
       return res.status(400).json({ 
         success: false,
-        message: "OTP has expired. Please request a new one." 
+        message: "OTP expired. Please request a new one.",
+        code: "OTP_EXPIRED"
       });
     }
 
     // Generate JWT token
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "365d",
-    });
+    const token = jwt.sign(
+      { userId: user._id }, 
+      process.env.JWT_SECRET,
+      { expiresIn: "365d" }
+    );
 
     // Fetch user data in parallel
     const [orders, messages, notifications] = await Promise.all([
@@ -222,7 +245,7 @@ const verifyOTP = async (req, res) => {
       Notification.find({ userId: user._id }).select('message date')
     ]);
 
-    // Clear OTP after successful verification
+    // Clear OTP
     user.otp = undefined;
     user.otpExpiry = undefined;
     await user.save();
@@ -232,7 +255,7 @@ const verifyOTP = async (req, res) => {
       message: "Login successful",
       token,
       user: {
-        userId: user._id,
+        id: user._id,
         fullName: user.fullName,
         phoneNumber: user.phoneNumber,
         email: user.email,
@@ -242,11 +265,11 @@ const verifyOTP = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Error verifying OTP:", error);
+    console.error("OTP verification error:", error);
     res.status(400).json({ 
       success: false,
       message: error.message || "OTP verification failed",
-      error: error.message
+      code: "OTP_ERROR"
     });
   }
 };
