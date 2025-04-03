@@ -1,78 +1,81 @@
-const { S3Client, DeleteObjectCommand, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const multerS3 = require("multer-s3");
 const path = require("path");
 const multer = require("multer");
 const Ad = require("../models/Ad");
 
-// Configure AWS S3 with error handling
+// Configure AWS S3 with enhanced settings
 const s3 = new S3Client({
   region: process.env.AWS_REGION || 'us-east-1',
   credentials: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
+  maxAttempts: 3, // Retry failed requests
 });
 
-// Enhanced file filter
-const fileFilter = (req, file, cb) => {
-  if (file.mimetype.startsWith("image/")) {
-    cb(null, true);
-  } else {
-    cb(new Error("Only image files are allowed!"), false);
-  }
-};
-
-// Multer configuration with better error handling
+// Robust Multer-S3 configuration
 const upload = multer({
   storage: multerS3({
     s3: s3,
     bucket: process.env.AWS_BUCKET_NAME,
-    acl: 'public-read', // Ensure files are publicly accessible
-    metadata: (req, file, cb) => {
-      cb(null, { fieldName: file.fieldname });
-    },
-    key: (req, file, cb) => {
-      const ext = path.extname(file.originalname).toLowerCase();
-      const fileName = `ads/${Date.now()}${ext}`;
-      cb(null, fileName);
-    },
+    acl: 'public-read',
     contentType: multerS3.AUTO_CONTENT_TYPE,
+    metadata: function (req, file, cb) {
+      cb(null, { 
+        fieldName: file.fieldname,
+        originalName: file.originalname 
+      });
+    },
+    key: function (req, file, cb) {
+      const ext = path.extname(file.originalname).toLowerCase();
+      const fileName = `ads/${Date.now()}-${Math.round(Math.random() * 1E9)}${ext}`;
+      cb(null, fileName);
+    }
   }),
-  fileFilter: fileFilter,
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only JPEG, PNG, and WEBP are allowed!'));
+    }
+  },
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit
-    files: 5 // Max 5 files per upload
+    fileSize: 10 * 1024 * 1024, // 10MB
+    files: 5
   }
 });
 
-// Helper function to get full image URL
+// Enhanced URL generator with CDN support
 const getImageUrl = (imageKey) => {
   if (!imageKey) return null;
+  if (process.env.AWS_CDN_URL) {
+    return `${process.env.AWS_CDN_URL}/${imageKey}`;
+  }
   return `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageKey}`;
 };
 
-// Upload Ads, Banners, or Banner1 with better error handling
+// Upload Ads with improved error handling
 exports.uploadAd = async (req, res) => {
   try {
     const { type } = req.params;
+    const validTypes = ["ads", "banner", "banner1"];
     
-    // Validate type
-    if (!["ads", "banner", "banner1"].includes(type)) {
+    if (!validTypes.includes(type)) {
       return res.status(400).json({ 
         success: false,
-        error: "Invalid type. Must be one of: ads, banner, banner1" 
+        error: `Invalid type. Must be one of: ${validTypes.join(', ')}`
       });
     }
 
-    // Check if files were uploaded
     if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: "No files were uploaded" 
+        error: "No files were uploaded"
       });
     }
 
-    // Create new ad document
     const imageKeys = req.files.map(file => file.key);
     const ad = new Ad({ 
       images: imageKeys, 
@@ -82,117 +85,172 @@ exports.uploadAd = async (req, res) => {
 
     await ad.save();
 
-    // Return response with full URLs
-    const responseAd = {
+    const responseData = {
       ...ad.toObject(),
       images: ad.images.map(imageKey => getImageUrl(imageKey))
     };
 
     res.status(201).json({
       success: true,
-      message: `${type} uploaded successfully!`,
-      ad: responseAd
+      message: `${type} uploaded successfully`,
+      data: responseData
     });
 
   } catch (error) {
-    console.error("Error uploading ad:", error);
+    console.error("Upload error:", error);
     
     // Cleanup uploaded files if error occurred
-    if (req.files && req.files.length > 0) {
+    if (req.files?.length > 0) {
       await Promise.all(req.files.map(file => {
         return s3.send(new DeleteObjectCommand({
           Bucket: process.env.AWS_BUCKET_NAME,
           Key: file.key
         })).catch(cleanupError => {
-          console.error("Error cleaning up file:", cleanupError);
+          console.error("Cleanup error:", cleanupError);
         });
       }));
     }
 
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      error: error.message || "Failed to upload image(s)" 
+      error: error.message || "Failed to upload files"
     });
   }
 };
 
-// Update an Ad, Banner, or Banner1 with better error handling
-exports.updateAd = async (req, res) => {
+// Get Ads with caching headers
+exports.getAds = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { type } = req.params;
+    const ads = await Ad.find({ type }).sort({ createdAt: -1 });
 
-    // Find existing ad
-    const ad = await Ad.findById(id);
-    if (!ad) {
-      return res.status(404).json({ 
-        success: false,
-        error: "Ad not found" 
-      });
-    }
-
-    // Check if new files were uploaded
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ 
-        success: false,
-        error: "No new files were uploaded for update" 
-      });
-    }
-
-    // Delete old images from S3
-    await Promise.all(ad.images.map(imageKey => {
-      return s3.send(new DeleteObjectCommand({
-        Bucket: process.env.AWS_BUCKET_NAME,
-        Key: imageKey
-      })).catch(deleteError => {
-        console.error("Error deleting old image:", deleteError);
-      });
-    }));
-
-    // Update with new images
-    const newImageKeys = req.files.map(file => file.key);
-    ad.images = newImageKeys;
-    ad.updatedAt = new Date();
-    await ad.save();
-
-    // Return response with full URLs
-    const responseAd = {
+    const responseData = ads.map(ad => ({
       ...ad.toObject(),
       images: ad.images.map(imageKey => getImageUrl(imageKey))
-    };
+    }));
+
+    // Add caching headers
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json({
+      success: true,
+      data: responseData
+    });
+
+  } catch (error) {
+    console.error("Fetch error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch ads"
+    });
+  }
+};
+
+// Delete Ad with existence check
+exports.deleteAd = async (req, res) => {
+  try {
+    const ad = await Ad.findById(req.params.id);
+    if (!ad) {
+      return res.status(404).json({
+        success: false,
+        error: "Ad not found"
+      });
+    }
+
+    // Parallel delete for better performance
+    await Promise.all([
+      ...ad.images.map(imageKey => 
+        s3.send(new DeleteObjectCommand({
+          Bucket: process.env.AWS_BUCKET_NAME,
+          Key: imageKey
+        })).catch(err => console.error("Delete image error:", err))
+      ),
+      ad.deleteOne()
+    ]);
 
     res.json({
       success: true,
-      message: "Ad updated successfully!",
-      updatedAd: responseAd
+      message: "Ad deleted successfully"
     });
 
   } catch (error) {
-    console.error("Error updating ad:", error);
-    
-    // Cleanup newly uploaded files if error occurred
-    if (req.files && req.files.length > 0) {
-      await Promise.all(req.files.map(file => {
-        return s3.send(new DeleteObjectCommand({
-          Bucket: process.env.AWS_BUCKET_NAME,
-          Key: file.key
-        })).catch(cleanupError => {
-          console.error("Error cleaning up file:", cleanupError);
-        });
-      }));
-    }
-
-    res.status(500).json({ 
+    console.error("Delete error:", error);
+    res.status(500).json({
       success: false,
-      error: error.message || "Failed to update ad" 
+      error: "Failed to delete ad"
     });
   }
 };
 
-// Other controller methods remain the same...
+// Update Ad with transaction-like behavior
+exports.updateAd = async (req, res) => {
+  try {
+    const ad = await Ad.findById(req.params.id);
+    if (!ad) {
+      return res.status(404).json({
+        success: false,
+        error: "Ad not found"
+      });
+    }
 
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "No new files provided for update"
+      });
+    }
+
+    // Store old images for cleanup
+    const oldImages = [...ad.images];
+    const newImages = req.files.map(file => file.key);
+
+    // Update document
+    ad.images = newImages;
+    ad.updatedAt = new Date();
+    await ad.save();
+
+    // Cleanup old images after successful update
+    await Promise.all(oldImages.map(imageKey => 
+      s3.send(new DeleteObjectCommand({
+        Bucket: process.env.AWS_BUCKET_NAME,
+        Key: imageKey
+      })).catch(err => console.error("Cleanup error:", err))
+    );
+
+    res.json({
+      success: true,
+      message: "Ad updated successfully",
+      data: {
+        ...ad.toObject(),
+        images: ad.images.map(imageKey => getImageUrl(imageKey))
+      }
+    });
+
+  } catch (error) {
+    console.error("Update error:", error);
+    
+    // Cleanup newly uploaded files if error occurred
+    if (req.files?.length > 0) {
+      await Promise.all(req.files.map(file => 
+        s3.send(new DeleteObjectCommand({
+          Bucket: process.env.AWS_BUCKET_NAME,
+          Key: file.key
+        })).catch(cleanupError => {
+          console.error("Cleanup error:", cleanupError);
+        })
+      ));
+    }
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to update ad"
+    });
+  }
+};
+
+// Export with proper middleware chaining
 module.exports = {
-  uploadAd: [upload.array("images", 5), exports.uploadAd], // Limit to 5 images
+  uploadAd: [upload.array("images", 5), exports.uploadAd],
   getAds: exports.getAds,
   deleteAd: exports.deleteAd,
-  updateAd: [upload.array("images", 5), exports.updateAd], // Limit to 5 images
+  updateAd: [upload.array("images", 5), exports.updateAd]
 };
