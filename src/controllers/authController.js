@@ -7,6 +7,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 
+// Email sending function (unchanged)
 const sendOTP = async (email, otp) => {
   const transporter = nodemailer.createTransport({
     service: process.env.EMAIL_SERVICE || 'gmail',
@@ -46,46 +47,53 @@ const sendOTP = async (email, otp) => {
   }
 };
 
+// Validation functions
 const validatePhoneNumber = (phoneNumber) => {
-  // Remove any non-digit characters
-  const cleaned = phoneNumber.replace(/\D/g, '');
+  if (!phoneNumber) throw new Error("Phone number is required");
+  
+  // Remove all non-digit characters
+  const cleaned = phoneNumber.toString().replace(/\D/g, '');
   
   // Check if phone number is 9 or 10 digits
   if (!/^[0-9]{9,10}$/.test(cleaned)) {
-    throw new Error("Phone number must be 9 or 10 digits");
+    throw new Error("Phone number must be 9 or 10 digits (e.g., 912345678 or 0912345678)");
   }
   
   return cleaned;
 };
 
 const validateEmail = (email) => {
+  if (!email) throw new Error("Email is required");
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new Error("Invalid email format");
+    throw new Error("Invalid email format (e.g., user@example.com)");
   }
 };
 
 const validatePassword = (password) => {
+  if (!password) throw new Error("Password is required");
   if (password.length < 8) {
     throw new Error("Password must be at least 8 characters");
   }
 };
 
+// Registration function
 const registerUser = async (req, res) => {
   const { fullName, phoneNumber, email, password } = req.body;
 
   try {
     // Validate inputs
     if (!fullName) throw new Error("Full name is required");
-    if (!phoneNumber) throw new Error("Phone number is required");
-    if (!email) throw new Error("Email is required");
-    if (!password) throw new Error("Password is required");
-
+    
     const validatedPhone = validatePhoneNumber(phoneNumber);
     validateEmail(email);
     validatePassword(password);
 
     // Check if user exists
-    const userExists = await User.findOne({ email });
+    const [userExists, phoneExists] = await Promise.all([
+      User.findOne({ email }),
+      User.findOne({ phoneNumber: validatedPhone })
+    ]);
+
     if (userExists) {
       return res.status(400).json({ 
         success: false,
@@ -93,7 +101,6 @@ const registerUser = async (req, res) => {
       });
     }
 
-    const phoneExists = await User.findOne({ phoneNumber: validatedPhone });
     if (phoneExists) {
       return res.status(400).json({ 
         success: false,
@@ -114,17 +121,25 @@ const registerUser = async (req, res) => {
 
     res.status(201).json({ 
       success: true,
-      message: "User registered successfully" 
+      message: "User registered successfully",
+      user: {
+        id: newUser._id,
+        fullName: newUser.fullName,
+        phoneNumber: newUser.phoneNumber,
+        email: newUser.email
+      }
     });
   } catch (error) {
     console.error("Error registering user:", error);
     res.status(400).json({ 
       success: false,
-      message: error.message || "Registration failed" 
+      message: error.message || "Registration failed",
+      error: error.message
     });
   }
 };
 
+// Login function
 const loginUser = async (req, res) => {
   const { email } = req.body;
 
@@ -151,17 +166,20 @@ const loginUser = async (req, res) => {
 
     res.status(200).json({ 
       success: true,
-      message: "OTP sent to your email" 
+      message: "OTP sent to your email",
+      email: email
     });
   } catch (error) {
     console.error("Error logging in user:", error);
     res.status(400).json({ 
       success: false,
-      message: error.message || "Login failed" 
+      message: error.message || "Login failed",
+      error: error.message
     });
   }
 };
 
+// OTP Verification function
 const verifyOTP = async (req, res) => {
   const { email, otp } = req.body;
 
@@ -197,7 +215,7 @@ const verifyOTP = async (req, res) => {
       expiresIn: "365d",
     });
 
-    // Fetch user data
+    // Fetch user data in parallel
     const [orders, messages, notifications] = await Promise.all([
       UserOrder.find({ userId: user._id }).select('date status total'),
       Message.find({ userId: user._id }).select('from message read date'),
@@ -227,7 +245,8 @@ const verifyOTP = async (req, res) => {
     console.error("Error verifying OTP:", error);
     res.status(400).json({ 
       success: false,
-      message: error.message || "OTP verification failed" 
+      message: error.message || "OTP verification failed",
+      error: error.message
     });
   }
 };
