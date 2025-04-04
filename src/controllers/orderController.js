@@ -26,16 +26,13 @@ const upload = multer({
 
     const ext = path.extname(file.originalname).toLowerCase();
 
-    if (allowedMimeTypes.includes(file.mimetype)) {  // Fixed this line - added missing parenthesis
+    if (allowedMimeTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error(`Unsupported file format: ${file.mimetype}`), false);
+      cb(new Error(`Unsupported file format: ${file.mimetype} (${ext})`), false);
     }
   },
-}).fields([
-  { name: 'paymentImage', maxCount: 1 },
-  { name: 'productImages', maxCount: 10 }
-]);
+});
 
 // Helper function to upload file to S3
 const uploadToS3 = async (fileBuffer, fileName, mimetype) => {
@@ -53,28 +50,36 @@ const uploadToS3 = async (fileBuffer, fileName, mimetype) => {
 // ✅ Create New Order
 exports.createOrder = async (req, res) => {
   try {
-    // First handle the file uploads using multer
-    upload(req, res, async (err) => {
+    // First handle the file uploads
+    const fileUpload = upload.fields([
+      { name: 'paymentImage', maxCount: 1 },
+      { name: 'productImages', maxCount: 10 }
+    ]);
+
+    fileUpload(req, res, async (err) => {
       if (err) {
         console.error("❌ Multer upload error:", err);
         return res.status(400).json({ error: err.message });
       }
 
       try {
-        const cleanedBody = {};
-        Object.keys(req.body).forEach((key) => {
-          cleanedBody[key.trim()] = req.body[key];
-        });
-
-        console.log("📌 Cleaned Request Body:", cleanedBody);
+        console.log("📌 Request Body:", req.body);
         console.log("📸 Uploaded Files:", req.files);
 
-        const userId = cleanedBody.userId || "Unknown ID";
-        const name = cleanedBody.name || "Unknown";
-        const amount = cleanedBody.amount ? parseFloat(cleanedBody.amount) : 0;
-        const phoneNumber = cleanedBody.phoneNumber || "";
-        const deliveryAddress = cleanedBody.deliveryAddress || "";
-        const status = cleanedBody.status || "Pending";
+        const userId = req.body.userId || "Unknown ID";
+        const name = req.body.name || "Unknown";
+        const amount = req.body.amount ? parseFloat(req.body.amount) : 0;
+        const phoneNumber = req.body.phoneNumber || "";
+        const deliveryAddress = req.body.deliveryAddress || "";
+        const status = req.body.status || "Pending";
+        let orderDetails = [];
+
+        try {
+          orderDetails = JSON.parse(req.body.orderDetails);
+        } catch (e) {
+          console.error("❌ Error parsing orderDetails:", e);
+          return res.status(400).json({ error: "Invalid orderDetails format" });
+        }
 
         // Handle avatar (using default for now)
         const avatar = "https://outlier-da.s3.eu-north-1.amazonaws.com/default-avatar.png";
@@ -91,53 +96,28 @@ exports.createOrder = async (req, res) => {
           );
         }
 
-        // Handle product images upload
-        let productImages = [];
-        if (req.files && req.files['productImages']) {
-          for (const productFile of req.files['productImages']) {
-            const productFileName = `product-${uuidv4()}${path.extname(productFile.originalname)}`;
-            const productImageUrl = await uploadToS3(
-              productFile.buffer,
-              productFileName,
-              productFile.mimetype
-            );
-            productImages.push(productImageUrl);
-          }
-        }
+        // Process order details
+        const processedOrderDetails = await Promise.all(
+          orderDetails.map(async (item) => {
+            try {
+              const product = await Product.findById(item.productId?._id || item.productId);
+              return {
+                productId: product?._id || item.productId,
+                product: product?.name || item.product,
+                quantity: item.quantity || 1,
+                price: item.price || product?.price || 0,
+                productImage: product?.images?.[0] || null,
+              };
+            } catch (error) {
+              console.error("Error processing product:", error);
+              return null;
+            }
+          })
+        );
 
-        let orderDetails = [];
-        if (cleanedBody.orderDetails) {
-          try {
-            orderDetails = JSON.parse(cleanedBody.orderDetails);
+        const validOrderDetails = processedOrderDetails.filter(item => item !== null);
 
-            orderDetails = await Promise.all(
-              orderDetails.map(async (item, index) => {
-                const product = await Product.findOne({ name: item.product });
-
-                if (!product) {
-                  console.error(`❌ Product not found: ${item.product}`);
-                  return null;
-                }
-
-                console.log(`✅ Found Product: ${product.name} - ID: ${product._id}`);
-
-                return {
-                  productId: product._id,
-                  product: item.product,
-                  quantity: item.quantity || 1,
-                  price: item.price || 0,
-                  productImage: productImages[index] || null,
-                };
-              })
-            );
-
-            orderDetails = orderDetails.filter((item) => item !== null);
-          } catch (error) {
-            return res.status(400).json({ error: "Invalid JSON format in orderDetails" });
-          }
-        }
-
-        console.log("✅ Final Order Details before saving:", orderDetails);
+        console.log("✅ Final Order Details:", validOrderDetails);
 
         const lastOrder = await Order.findOne().sort({ id: -1 });
         const newId = lastOrder ? lastOrder.id + 1 : 1;
@@ -152,19 +132,19 @@ exports.createOrder = async (req, res) => {
           deliveryAddress,
           avatar,
           paymentImage,
-          orderDetails,
+          orderDetails: validOrderDetails,
           createdAt: new Date(),
         });
 
         await newOrder.save();
         res.status(201).json(newOrder);
       } catch (error) {
-        console.error("❌ Error creating order:", error.message);
+        console.error("❌ Error creating order:", error);
         res.status(500).json({ error: error.message });
       }
     });
   } catch (error) {
-    console.error("❌ Outer error in createOrder:", error.message);
+    console.error("❌ Outer error in createOrder:", error);
     res.status(500).json({ error: error.message });
   }
 };
