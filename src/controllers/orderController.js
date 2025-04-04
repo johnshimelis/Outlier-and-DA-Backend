@@ -51,25 +51,21 @@ const getImageUrl = (imageName) =>
 
 // ✅ Create New Order
 // ✅ Create New Order
+// ✅ Create New Order
 exports.createOrder = async (req, res) => {
   try {
     console.log("📦 Starting order creation process");
     console.log("📝 Request body:", req.body);
     console.log("📸 Uploaded files:", req.files);
 
-    const cleanedBody = {};
-    Object.keys(req.body).forEach((key) => {
-      cleanedBody[key.trim()] = req.body[key];
-    });
-
-    // Process payment image - CRUCIAL FIX
+    // Process files first
     let paymentImageUrl = null;
     if (req.files && req.files['paymentImage'] && req.files['paymentImage'][0]) {
       paymentImageUrl = req.files['paymentImage'][0].location;
       console.log("💰 Payment image URL:", paymentImageUrl);
     }
 
-    // Process product images - CRUCIAL FIX
+    // Process product images
     let productImageUrls = [];
     if (req.files && req.files['productImages']) {
       productImageUrls = req.files['productImages'].map(file => file.location);
@@ -78,9 +74,13 @@ exports.createOrder = async (req, res) => {
 
     // Parse order details
     let orderDetails = [];
-    if (cleanedBody.orderDetails) {
+    if (req.body.orderDetails) {
       try {
-        orderDetails = JSON.parse(cleanedBody.orderDetails).map((item, index) => ({
+        const parsedDetails = typeof req.body.orderDetails === 'string' 
+          ? JSON.parse(req.body.orderDetails) 
+          : req.body.orderDetails;
+
+        orderDetails = parsedDetails.map((item, index) => ({
           productId: item.productId,
           product: item.product,
           quantity: item.quantity || 1,
@@ -99,12 +99,12 @@ exports.createOrder = async (req, res) => {
 
     const newOrder = new Order({
       id: newId,
-      userId: cleanedBody.userId || "Unknown ID",
-      name: cleanedBody.name || "Unknown",
-      amount: parseFloat(cleanedBody.amount) || 0,
-      phoneNumber: cleanedBody.phoneNumber || "",
-      deliveryAddress: cleanedBody.deliveryAddress || "",
-      status: cleanedBody.status || "Pending",
+      userId: req.body.userId || "Unknown ID",
+      name: req.body.name || "Unknown",
+      amount: parseFloat(req.body.amount) || 0,
+      phoneNumber: req.body.phoneNumber || "",
+      deliveryAddress: req.body.deliveryAddress || "",
+      status: req.body.status || "Pending",
       paymentImage: paymentImageUrl,
       avatar: req.files && req.files['avatar'] && req.files['avatar'][0] 
         ? req.files['avatar'][0].location 
@@ -124,7 +124,6 @@ exports.createOrder = async (req, res) => {
     });
   }
 };
-
 // ✅ Update Order (Now Updates Product Stock & Sold when Delivered)
 exports.updateOrder = async (req, res) => {
   try {
