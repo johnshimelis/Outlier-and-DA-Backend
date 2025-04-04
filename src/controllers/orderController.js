@@ -60,6 +60,10 @@ exports.createOrder = [
       console.log("📝 Text fields:", req.body);
       console.log("📸 Files received:", req.files);
 
+      if (!req.files || (!req.files['paymentImage'] && !req.files['productImages'])) {
+        return res.status(400).json({ error: "No files were uploaded" });
+      }
+
       // Process text fields
       const { 
         userId, 
@@ -71,9 +75,13 @@ exports.createOrder = [
         orderDetails 
       } = req.body;
 
+      if (!userId || !name || !phoneNumber || !deliveryAddress || !orderDetails) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+
       // Process payment image
       let paymentImageUrl = null;
-      if (req.files['paymentImage']) {
+      if (req.files['paymentImage'] && req.files['paymentImage'][0]) {
         const paymentFile = req.files['paymentImage'][0];
         paymentImageUrl = await uploadToS3(
           paymentFile.buffer,
@@ -150,7 +158,7 @@ exports.createOrder = [
   }
 ];
 
-// ✅ Update Order (Now Updates Product Stock & Sold when Delivered)
+// Other controller methods remain the same...
 exports.updateOrder = async (req, res) => {
   try {
     const { id } = req.params;
@@ -164,7 +172,6 @@ exports.updateOrder = async (req, res) => {
       return res.status(404).json({ error: "Order not found!" });
     }
 
-    // ✅ If status is "Delivered", update product stock & sold values
     if (updates.status === "Delivered") {
       for (const item of order.orderDetails) {
         const product = await Product.findById(item.productId);
@@ -186,14 +193,11 @@ exports.updateOrder = async (req, res) => {
   }
 };
 
-// ✅ Get all Orders
 exports.getOrders = async (req, res) => {
   try {
     const orders = await Order.find().select(
       "id userId name avatar amount status phoneNumber deliveryAddress paymentImage orderDetails createdAt"
     );
-
-    console.log("📤 Orders Fetched from Database:", JSON.stringify(orders, null, 2));
 
     res.json(orders);
   } catch (error) {
@@ -202,7 +206,6 @@ exports.getOrders = async (req, res) => {
   }
 };
 
-// ✅ Get Order By ID
 exports.getOrderById = async (req, res) => {
   try {
     const order = await Order.findOne({ id: req.params.id }).select(
@@ -215,7 +218,6 @@ exports.getOrderById = async (req, res) => {
   }
 };
 
-// ✅ Delete Order
 exports.deleteOrder = async (req, res) => {
   try {
     const deletedOrder = await Order.findOneAndDelete({ id: req.params.id });
@@ -226,7 +228,6 @@ exports.deleteOrder = async (req, res) => {
   }
 };
 
-// ✅ Delete All Orders
 exports.deleteAllOrders = async (req, res) => {
   try {
     await Order.deleteMany({});
@@ -236,10 +237,9 @@ exports.deleteAllOrders = async (req, res) => {
   }
 };
 
-// ✅ Get Order By Order ID and User ID
 exports.getOrderByOrderIdAndUserId = async (req, res) => {
   const { orderId, userId } = req.params;
-  console.log("Fetching order for:", orderId, userId); // Log the parameters
+  console.log("Fetching order for:", orderId, userId);
 
   try {
     const order = await Order.findOne({ id: orderId, userId: userId });
@@ -256,5 +256,4 @@ exports.getOrderByOrderIdAndUserId = async (req, res) => {
   }
 };
 
-// Export the upload middleware
 module.exports.upload = upload;
