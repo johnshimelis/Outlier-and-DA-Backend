@@ -50,6 +50,7 @@ const getImageUrl = (imageName) =>
   imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
 
 // ✅ Create New Order
+// ✅ Create New Order
 exports.createOrder = async (req, res) => {
   try {
     const cleanedBody = {};
@@ -67,22 +68,12 @@ exports.createOrder = async (req, res) => {
     const deliveryAddress = cleanedBody.deliveryAddress || "";
     const status = cleanedBody.status || "Pending";
 
-    // Upload avatar to S3
-    const avatar = req.files["avatar"]
-      ? getImageUrl(req.files["avatar"][0].key) // Use S3 key to generate URL
-      : getImageUrl("default-avatar.png");
+    // Get URLs for uploaded files
+    const avatar = req.files["avatar"]?.[0]?.location || getImageUrl("default-avatar.png");
+    const paymentImage = req.files["paymentImage"]?.[0]?.location || null;
 
-    console.log("🖼️ Avatar Path Saved:", avatar);
-
-    // Upload payment image to S3
-    const paymentImage = req.files["paymentImage"]
-      ? getImageUrl(req.files["paymentImage"][0].key) // Use S3 key to generate URL
-      : null;
-
-    // Upload product images to S3
-    const productImages = req.files["productImages"]
-      ? req.files["productImages"].map((file) => getImageUrl(file.key)) // Use S3 key to generate URLs
-      : [];
+    // Process product images
+    const productImages = req.files["productImages"]?.map(file => file.location) || [];
 
     let orderDetails = [];
     if (cleanedBody.orderDetails) {
@@ -101,16 +92,16 @@ exports.createOrder = async (req, res) => {
             console.log(`✅ Found Product: ${product.name} - ID: ${product._id}`);
 
             return {
-              productId: product._id, // ✅ Store actual product ID
+              productId: product._id,
               product: item.product,
               quantity: item.quantity || 1,
               price: item.price || 0,
-              productImage: productImages[index] || null, // Use S3 URL
+              productImage: productImages[index] || null,
             };
           })
         );
 
-        orderDetails = orderDetails.filter((item) => item !== null); // Remove null values if any
+        orderDetails = orderDetails.filter((item) => item !== null);
       } catch (error) {
         return res.status(400).json({ error: "Invalid JSON format in orderDetails" });
       }
