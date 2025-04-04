@@ -26,7 +26,7 @@ const upload = multer({
 
     const ext = path.extname(file.originalname).toLowerCase();
 
-    if (allowedMimeTypes.includes(file.mimetype) {
+    if (allowedMimeTypes.includes(file.mimetype)) {  // Fixed this line - added missing parenthesis
       cb(null, true);
     } else {
       cb(new Error(`Unsupported file format: ${file.mimetype}`), false);
@@ -169,7 +169,6 @@ exports.createOrder = async (req, res) => {
   }
 };
 
-// ... [rest of your existing code remains the same] ...
 
 // ✅ Update Order (Now Updates Product Stock & Sold when Delivered)
 exports.updateOrder = async (req, res) => {
