@@ -16,23 +16,7 @@ const s3 = new S3Client({
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
-const upload = multer({
-  storage: storage,
-  fileFilter: (req, file, cb) => {
-    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 
-      'image/bmp', 'image/tiff', 'image/svg+xml', 'image/avif', 
-      'application/octet-stream'];
-    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg', '.webp', '.avif'];
-
-    const ext = path.extname(file.originalname).toLowerCase();
-
-    if (allowedMimeTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`Unsupported file format: ${file.mimetype} (${ext})`), false);
-    }
-  },
-});
+const upload = multer({ storage: storage });
 
 // Helper function to upload file to S3
 const uploadToS3 = async (fileBuffer, fileName, mimetype) => {
@@ -51,12 +35,12 @@ const uploadToS3 = async (fileBuffer, fileName, mimetype) => {
 exports.createOrder = async (req, res) => {
   try {
     // First handle the file uploads
-    const fileUpload = upload.fields([
+    const fileHandler = upload.fields([
       { name: 'paymentImage', maxCount: 1 },
       { name: 'productImages', maxCount: 10 }
     ]);
 
-    fileUpload(req, res, async (err) => {
+    fileHandler(req, res, async (err) => {
       if (err) {
         console.error("❌ Multer upload error:", err);
         return res.status(400).json({ error: err.message });
@@ -66,28 +50,26 @@ exports.createOrder = async (req, res) => {
         console.log("📌 Request Body:", req.body);
         console.log("📸 Uploaded Files:", req.files);
 
-        const userId = req.body.userId || "Unknown ID";
-        const name = req.body.name || "Unknown";
-        const amount = req.body.amount ? parseFloat(req.body.amount) : 0;
-        const phoneNumber = req.body.phoneNumber || "";
-        const deliveryAddress = req.body.deliveryAddress || "";
-        const status = req.body.status || "Pending";
-        let orderDetails = [];
+        // Parse text fields from req.body
+        const { userId, name, amount, phoneNumber, deliveryAddress, status = "Pending", orderDetails } = req.body;
 
+        if (!userId || !name || !amount || !orderDetails) {
+          return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        // Parse orderDetails from JSON string
+        let parsedOrderDetails;
         try {
-          orderDetails = JSON.parse(req.body.orderDetails);
+          parsedOrderDetails = JSON.parse(orderDetails);
         } catch (e) {
           console.error("❌ Error parsing orderDetails:", e);
           return res.status(400).json({ error: "Invalid orderDetails format" });
         }
 
-        // Handle avatar (using default for now)
-        const avatar = "https://outlier-da.s3.eu-north-1.amazonaws.com/default-avatar.png";
-
         // Handle payment image upload
         let paymentImage = null;
-        if (req.files && req.files['paymentImage']) {
-          const paymentFile = req.files['paymentImage'][0];
+        if (req.files?.paymentImage?.[0]) {
+          const paymentFile = req.files.paymentImage[0];
           const paymentFileName = `payment-${uuidv4()}${path.extname(paymentFile.originalname)}`;
           paymentImage = await uploadToS3(
             paymentFile.buffer,
@@ -98,9 +80,9 @@ exports.createOrder = async (req, res) => {
 
         // Process order details
         const processedOrderDetails = await Promise.all(
-          orderDetails.map(async (item) => {
+          parsedOrderDetails.map(async (item) => {
             try {
-              const product = await Product.findById(item.productId?._id || item.productId);
+              const product = await Product.findById(item.productId?._id || item.productId).lean();
               return {
                 productId: product?._id || item.productId,
                 product: product?.name || item.product,
@@ -117,8 +99,7 @@ exports.createOrder = async (req, res) => {
 
         const validOrderDetails = processedOrderDetails.filter(item => item !== null);
 
-        console.log("✅ Final Order Details:", validOrderDetails);
-
+        // Create and save order
         const lastOrder = await Order.findOne().sort({ id: -1 });
         const newId = lastOrder ? lastOrder.id + 1 : 1;
 
@@ -126,11 +107,11 @@ exports.createOrder = async (req, res) => {
           id: newId,
           userId,
           name,
-          amount,
+          amount: parseFloat(amount),
           status,
           phoneNumber,
           deliveryAddress,
-          avatar,
+          avatar: "https://outlier-da.s3.eu-north-1.amazonaws.com/default-avatar.png",
           paymentImage,
           orderDetails: validOrderDetails,
           createdAt: new Date(),
@@ -148,7 +129,6 @@ exports.createOrder = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
-
 
 // ✅ Update Order (Now Updates Product Stock & Sold when Delivered)
 exports.updateOrder = async (req, res) => {
