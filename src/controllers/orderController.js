@@ -4,20 +4,14 @@ const path = require("path");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 
-// Configure AWS S3 with error handling
-let s3;
-try {
-  s3 = new S3Client({
-    region: process.env.AWS_REGION,
-    credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    },
-  });
-} catch (s3Error) {
-  console.error("❌ AWS S3 Configuration Error:", s3Error);
-  throw new Error("Failed to initialize S3 client");
-}
+// Configure AWS S3 with enhanced error handling
+const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
 
 // Configure multer with strict validation
 const storage = multer.memoryStorage();
@@ -37,39 +31,32 @@ const upload = multer({
   }
 });
 
-// Enhanced S3 upload helper with retries
+// Enhanced S3 upload helper with better error handling
 const uploadToS3 = async (fileBuffer, fileName, mimetype) => {
   const uploadParams = {
     Bucket: process.env.AWS_BUCKET_NAME,
     Key: fileName,
     Body: fileBuffer,
     ContentType: mimetype,
-    ACL: 'public-read' // Ensure files are accessible
+    ACL: 'public-read'
   };
 
   try {
-    const data = await s3.send(new PutObjectCommand(uploadParams));
-    console.log(`✅ S3 Upload Success for ${fileName}`);
+    await s3.send(new PutObjectCommand(uploadParams));
     return `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
   } catch (err) {
-    console.error("❌ S3 Upload Error:", {
-      fileName,
-      error: err.message,
-      stack: err.stack
-    });
+    console.error("S3 Upload Error:", err);
     throw new Error(`Failed to upload file to S3: ${err.message}`);
   }
 };
 
-// Create Order Controller with comprehensive validation
+// Create Order with comprehensive validation
 exports.createOrder = [
   upload.fields([
     { name: 'paymentImage', maxCount: 1 },
     { name: 'productImages', maxCount: 10 }
   ]),
   async (req, res) => {
-    console.log("📦 Order creation request received");
-    
     try {
       // Validate required fields
       const requiredFields = ['userId', 'name', 'phoneNumber', 'deliveryAddress', 'orderDetails'];
@@ -82,173 +69,116 @@ exports.createOrder = [
         });
       }
 
-      // Validate files
-      if (!req.files || !req.files['paymentImage']) {
-        return res.status(400).json({ 
-          error: "Payment image is required" 
-        });
+      // Process files
+      if (!req.files?.['paymentImage']) {
+        return res.status(400).json({ error: "Payment image is required" });
       }
 
-      // Destructure with defaults
-      const { 
-        userId, 
-        name, 
-        amount = 0, 
-        phoneNumber, 
-        deliveryAddress, 
-        status = "Pending", 
-        orderDetails 
-      } = req.body;
+      // Process payment image
+      const paymentFile = req.files['paymentImage'][0];
+      const paymentImageUrl = await uploadToS3(
+        paymentFile.buffer,
+        `payments/${Date.now()}${path.extname(paymentFile.originalname)}`,
+        paymentFile.mimetype
+      );
 
-      // Process payment image with validation
-      let paymentImageUrl;
-      try {
-        const paymentFile = req.files['paymentImage'][0];
-        paymentImageUrl = await uploadToS3(
-          paymentFile.buffer,
-          `payments/${Date.now()}-${paymentFile.originalname}`,
-          paymentFile.mimetype
-        );
-        console.log("💰 Payment image processed:", paymentImageUrl);
-      } catch (paymentError) {
-        console.error("❌ Payment image processing failed:", paymentError);
-        return res.status(500).json({ 
-          error: "Failed to process payment image",
-          details: paymentError.message
-        });
-      }
-
-      // Process product images with error tolerance
+      // Process product images
       let productImageUrls = [];
       if (req.files['productImages']) {
-        try {
-          productImageUrls = await Promise.all(
-            req.files['productImages'].map(async (file, index) => {
-              try {
-                const url = await uploadToS3(
-                  file.buffer,
-                  `products/${Date.now()}-${index}-${file.originalname}`,
-                  file.mimetype
-                );
-                console.log(`🖼️ Product image ${index} processed:`, url);
-                return url;
-              } catch (fileError) {
-                console.error(`⚠️ Failed to process product image ${index}:`, fileError);
-                return null; // Continue with other images if one fails
-              }
-            })
-          );
-          // Filter out any failed uploads
-          productImageUrls = productImageUrls.filter(url => url !== null);
-        } catch (batchError) {
-          console.error("⚠️ Partial failure processing product images:", batchError);
-          // Continue with order even if some product images failed
-        }
+        productImageUrls = await Promise.all(
+          req.files['productImages'].map(async (file, index) => {
+            const url = await uploadToS3(
+              file.buffer,
+              `products/${Date.now()}-${index}${path.extname(file.originalname)}`,
+              file.mimetype
+            );
+            return url;
+          })
+        );
       }
 
-      // Parse and validate order details
-      let parsedOrderDetails;
-      try {
-        parsedOrderDetails = JSON.parse(orderDetails).map((item, index) => {
-          if (!item.productId) {
-            throw new Error(`Missing productId in item ${index}`);
-          }
-          
-          return {
-            productId: item.productId,
-            product: item.product || `Product ${index + 1}`,
-            quantity: item.quantity || 1,
-            price: item.price || 0,
-            productImage: productImageUrls[index] || null
-          };
-        });
-      } catch (parseError) {
-        console.error("❌ Order details parsing failed:", {
-          error: parseError.message,
-          orderDetails
-        });
-        return res.status(400).json({ 
-          error: "Invalid orderDetails format",
-          details: parseError.message
-        });
-      }
+      // Parse order details
+      const orderDetails = JSON.parse(req.body.orderDetails).map((item, index) => ({
+        productId: item.productId,
+        product: item.product || `Product ${index + 1}`,
+        quantity: item.quantity || 1,
+        price: item.price || 0,
+        productImage: productImageUrls[index] || null
+      }));
 
-      // Generate order ID
-      const lastOrder = await Order.findOne().sort({ id: -1 }).lean();
-      const newId = lastOrder ? lastOrder.id + 1 : 1;
-
-      // Create order document
+      // Create new order
+      const lastOrder = await Order.findOne().sort({ id: -1 });
       const newOrder = new Order({
-        id: newId,
-        userId,
-        name,
-        amount: parseFloat(amount),
-        status,
-        phoneNumber,
-        deliveryAddress,
+        id: lastOrder ? lastOrder.id + 1 : 1,
+        userId: req.body.userId,
+        name: req.body.name,
+        amount: parseFloat(req.body.amount) || 0,
+        phoneNumber: req.body.phoneNumber,
+        deliveryAddress: req.body.deliveryAddress,
+        status: req.body.status || "Pending",
         paymentImage: paymentImageUrl,
-        orderDetails: parsedOrderDetails,
-        createdAt: new Date(),
-        updatedAt: new Date()
+        orderDetails,
+        createdAt: new Date()
       });
 
-      // Save with validation
-      try {
-        await newOrder.validate();
-        const savedOrder = await newOrder.save();
-        console.log("✅ Order created successfully:", savedOrder.id);
-
-        return res.status(201).json({
-          success: true,
-          order: savedOrder
-        });
-      } catch (saveError) {
-        console.error("❌ Order save failed:", {
-          error: saveError.message,
-          validationErrors: saveError.errors
-        });
-        return res.status(400).json({
-          error: "Validation failed",
-          details: saveError.message
-        });
-      }
-
+      await newOrder.save();
+      res.status(201).json(newOrder);
     } catch (error) {
-      console.error("❌ Critical order creation error:", {
-        message: error.message,
-        stack: error.stack,
-        body: req.body,
-        files: req.files ? Object.keys(req.files) : null
-      });
-
-      return res.status(500).json({
-        error: "Internal server error",
-        message: error.message,
-        ...(process.env.NODE_ENV === 'development' && {
-          stack: error.stack
-        })
+      console.error("Order creation failed:", error);
+      res.status(500).json({ 
+        error: error.message,
+        ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
       });
     }
   }
 ];
 
-// Enhanced Update Order Controller
+// Get all orders with pagination
+exports.getOrders = async (req, res) => {
+  try {
+    const { page = 1, limit = 10, status } = req.query;
+    const query = status ? { status } : {};
+
+    const orders = await Order.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+
+    const total = await Order.countDocuments(query);
+
+    res.json({
+      data: orders,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Get single order by ID
+exports.getOrderById = async (req, res) => {
+  try {
+    const order = await Order.findOne({ id: req.params.id });
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    res.json(order);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Update order
 exports.updateOrder = async (req, res) => {
   try {
-    const { id } = req.params;
-    const updates = req.body;
-
-    console.log(`🔄 Updating Order ${id} with:`, updates);
-
-    // Validate ID
-    if (!id || isNaN(parseInt(id))) {
-      return res.status(400).json({ error: "Invalid order ID" });
-    }
-
-    // Find and update
     const order = await Order.findOneAndUpdate(
-      { id: parseInt(id) },
-      { ...updates, updatedAt: new Date() },
+      { id: req.params.id },
+      { ...req.body, updatedAt: new Date() },
       { new: true, runValidators: true }
     );
 
@@ -256,172 +186,66 @@ exports.updateOrder = async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    // Handle delivery status
-    if (updates.status === "Delivered") {
-      try {
-        await Promise.all(
-          order.orderDetails.map(async (item) => {
-            const product = await Product.findById(item.productId);
-            if (product) {
-              product.sold += item.quantity;
-              product.stockQuantity -= item.quantity;
-              await product.save();
-            }
-          })
-        );
-        console.log(`📦 Order ${id} marked as delivered and inventory updated`);
-      } catch (inventoryError) {
-        console.error(`⚠️ Inventory update failed for order ${id}:`, inventoryError);
-        // Continue even if inventory update fails
-      }
+    // Update product inventory if status changed to Delivered
+    if (req.body.status === "Delivered") {
+      await Promise.all(
+        order.orderDetails.map(async item => {
+          const product = await Product.findById(item.productId);
+          if (product) {
+            product.stockQuantity -= item.quantity;
+            product.sold += item.quantity;
+            await product.save();
+          }
+        })
+      );
     }
 
-    return res.json({
-      success: true,
-      order
-    });
-
+    res.json(order);
   } catch (error) {
-    console.error(`❌ Order update failed for ID ${req.params.id}:`, error);
-    return res.status(500).json({
-      error: "Failed to update order",
-      message: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 };
 
-// Get Orders with pagination and filtering
-exports.getOrders = async (req, res) => {
-  try {
-    const { page = 1, limit = 10, status } = req.query;
-    const filter = status ? { status } : {};
-
-    const orders = await Order.find(filter)
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit))
-      .select("-__v");
-
-    const total = await Order.countDocuments(filter);
-
-    return res.json({
-      success: true,
-      data: orders,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    });
-
-  } catch (error) {
-    console.error("❌ Error fetching orders:", error);
-    return res.status(500).json({
-      error: "Failed to fetch orders",
-      message: error.message
-    });
-  }
-};
-
-// Get Order By ID with enhanced error handling
-exports.getOrderById = async (req, res) => {
-  try {
-    const order = await Order.findOne({ id: req.params.id })
-      .select("-__v")
-      .lean();
-
-    if (!order) {
-      return res.status(404).json({ 
-        error: "Order not found",
-        id: req.params.id
-      });
-    }
-
-    // Populate product details if needed
-    if (req.query.populate === "products") {
-      const productIds = order.orderDetails.map(item => item.productId);
-      const products = await Product.find({ _id: { $in: productIds } })
-        .select("name price images")
-        .lean();
-
-      order.orderDetails = order.orderDetails.map(item => ({
-        ...item,
-        productDetails: products.find(p => p._id.toString() === item.productId.toString())
-      }));
-    }
-
-    return res.json({
-      success: true,
-      order
-    });
-
-  } catch (error) {
-    console.error(`❌ Error fetching order ${req.params.id}:`, error);
-    return res.status(500).json({
-      error: "Failed to fetch order",
-      message: error.message
-    });
-  }
-};
-
-// Delete Order with confirmation
+// Delete single order
 exports.deleteOrder = async (req, res) => {
   try {
-    const deletedOrder = await Order.findOneAndDelete({ id: req.params.id });
-
-    if (!deletedOrder) {
-      return res.status(404).json({ 
-        error: "Order not found",
-        id: req.params.id
-      });
+    const order = await Order.findOneAndDelete({ id: req.params.id });
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
     }
-
-    console.log(`🗑️ Order ${req.params.id} deleted`);
-    return res.json({
-      success: true,
-      message: "Order deleted successfully"
-    });
-
+    res.json({ message: "Order deleted successfully" });
   } catch (error) {
-    console.error(`❌ Error deleting order ${req.params.id}:`, error);
-    return res.status(500).json({
-      error: "Failed to delete order",
-      message: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 };
 
-// Get Order By User and Order ID
+// Delete all orders
+exports.deleteAllOrders = async (req, res) => {
+  try {
+    await Order.deleteMany({});
+    res.json({ message: "All orders deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Get order by order ID and user ID
 exports.getOrderByOrderIdAndUserId = async (req, res) => {
   try {
-    const { orderId, userId } = req.params;
-
     const order = await Order.findOne({ 
-      id: orderId, 
-      userId 
-    }).select("-__v");
+      id: req.params.orderId, 
+      userId: req.params.userId 
+    });
 
     if (!order) {
-      return res.status(404).json({ 
-        error: "Order not found",
-        orderId,
-        userId
-      });
+      return res.status(404).json({ error: "Order not found" });
     }
 
-    return res.json({
-      success: true,
-      order
-    });
-
+    res.json(order);
   } catch (error) {
-    console.error("❌ Error fetching user order:", error);
-    return res.status(500).json({
-      error: "Failed to fetch order",
-      message: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 };
 
-module.exports.upload = upload;
+// Export upload middleware
+exports.upload = upload;
