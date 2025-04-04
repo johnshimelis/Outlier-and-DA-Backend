@@ -15,21 +15,20 @@ exports.getCart = async (req, res) => {
 // Add an item to the cart (handling form-data with image upload)
 exports.addToCart = async (req, res) => {
   try {
-    console.log("Received Body:", req.body);
-    console.log("Received File:", req.file);
-
-    // Trim spaces from keys before destructuring
-    const sanitizedBody = Object.fromEntries(
-      Object.entries(req.body).map(([key, value]) => [key.trim(), value])
-    );
+    // Get userId from authenticated user (requires auth middleware)
+    const userId = req.user.id;
+    
+    // Validate required fields
+    if (!req.body.productId || !req.body.productName || req.body.price === undefined) {
+      return res.status(400).json({ 
+        error: "Missing required fields",
+        required: ["productId", "productName", "price"],
+        received: req.body
+      });
+    }
 
     // Destructure fields from the request body
-    const { userId, productId, productName, price, quantity, img } = sanitizedBody;
-
-    // Validate required fields
-    if (!userId || !productId || !productName || price === undefined) {
-      return res.status(400).json({ error: "Missing required fields", receivedData: sanitizedBody });
-    }
+    const { productId, productName, price, quantity, img } = req.body;
 
     // Find or create the user's cart
     let cart = await Cart.findOne({ userId });
@@ -49,7 +48,7 @@ exports.addToCart = async (req, res) => {
       cart.items.push({
         productId,
         productName,
-        img: img || null, // Use the provided image URL or default to null
+        img: img || null,
         price: Number(price),
         quantity: Number(quantity) || 1,
       });
@@ -62,7 +61,11 @@ exports.addToCart = async (req, res) => {
     res.status(200).json({ message: "Item added to cart", cart });
   } catch (error) {
     console.error("Error adding to cart:", error);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ 
+      error: "Server error",
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 };
 
