@@ -53,91 +53,75 @@ const getImageUrl = (imageName) =>
 // ✅ Create New Order
 exports.createOrder = async (req, res) => {
   try {
+    console.log("📦 Starting order creation process");
+    console.log("📝 Request body:", req.body);
+    console.log("📸 Uploaded files:", req.files);
+
     const cleanedBody = {};
     Object.keys(req.body).forEach((key) => {
       cleanedBody[key.trim()] = req.body[key];
     });
 
-    console.log("📌 Cleaned Request Body:", cleanedBody);
-    console.log("📸 Uploaded Files:", req.files);
-
-    const userId = cleanedBody.userId || "Unknown ID";
-    const name = cleanedBody.name || "Unknown";
-    const amount = cleanedBody.amount ? parseFloat(cleanedBody.amount) : 0;
-    const phoneNumber = cleanedBody.phoneNumber || "";
-    const deliveryAddress = cleanedBody.deliveryAddress || "";
-    const status = cleanedBody.status || "Pending";
-
-    // Get avatar URL (use default if not provided)
-    const avatar = getImageUrl("default-avatar.png");
-
-    // Get payment image URL from uploaded files
-    const paymentImage = req.files["paymentImage"] && req.files["paymentImage"][0] 
-      ? getImageUrl(req.files["paymentImage"][0].key) 
-      : null;
-
-    // Get product images URLs from uploaded files
-    let productImages = [];
-    if (req.files["productImages"]) {
-      productImages = req.files["productImages"].map(file => getImageUrl(file.key));
+    // Process payment image - CRUCIAL FIX
+    let paymentImageUrl = null;
+    if (req.files && req.files['paymentImage'] && req.files['paymentImage'][0]) {
+      paymentImageUrl = req.files['paymentImage'][0].location;
+      console.log("💰 Payment image URL:", paymentImageUrl);
     }
 
+    // Process product images - CRUCIAL FIX
+    let productImageUrls = [];
+    if (req.files && req.files['productImages']) {
+      productImageUrls = req.files['productImages'].map(file => file.location);
+      console.log("🖼️ Product image URLs:", productImageUrls);
+    }
+
+    // Parse order details
     let orderDetails = [];
     if (cleanedBody.orderDetails) {
       try {
-        orderDetails = JSON.parse(cleanedBody.orderDetails);
-
-        orderDetails = await Promise.all(
-          orderDetails.map(async (item, index) => {
-            const product = await Product.findOne({ name: item.product });
-
-            if (!product) {
-              console.error(`❌ Product not found: ${item.product}`);
-              return null;
-            }
-
-            console.log(`✅ Found Product: ${product.name} - ID: ${product._id}`);
-
-            return {
-              productId: product._id,
-              product: item.product,
-              quantity: item.quantity || 1,
-              price: item.price || 0,
-              productImage: productImages[index] || null, // Use the uploaded image URL
-            };
-          })
-        );
-
-        orderDetails = orderDetails.filter((item) => item !== null);
+        orderDetails = JSON.parse(cleanedBody.orderDetails).map((item, index) => ({
+          productId: item.productId,
+          product: item.product,
+          quantity: item.quantity || 1,
+          price: item.price || 0,
+          productImage: productImageUrls[index] || null
+        }));
       } catch (error) {
-        return res.status(400).json({ error: "Invalid JSON format in orderDetails" });
+        console.error("❌ Error parsing orderDetails:", error);
+        return res.status(400).json({ error: "Invalid orderDetails format" });
       }
     }
 
-    console.log("✅ Final Order Details before saving:", orderDetails);
-
+    // Create new order
     const lastOrder = await Order.findOne().sort({ id: -1 });
     const newId = lastOrder ? lastOrder.id + 1 : 1;
 
     const newOrder = new Order({
       id: newId,
-      userId,
-      name,
-      amount,
-      status,
-      phoneNumber,
-      deliveryAddress,
-      avatar,
-      paymentImage,
+      userId: cleanedBody.userId || "Unknown ID",
+      name: cleanedBody.name || "Unknown",
+      amount: parseFloat(cleanedBody.amount) || 0,
+      phoneNumber: cleanedBody.phoneNumber || "",
+      deliveryAddress: cleanedBody.deliveryAddress || "",
+      status: cleanedBody.status || "Pending",
+      paymentImage: paymentImageUrl,
+      avatar: req.files && req.files['avatar'] && req.files['avatar'][0] 
+        ? req.files['avatar'][0].location 
+        : "https://outlier-da.s3.eu-north-1.amazonaws.com/default-avatar.png",
       orderDetails,
-      createdAt: new Date(),
+      createdAt: new Date()
     });
 
     await newOrder.save();
+    console.log("✅ Order created successfully:", newOrder);
     res.status(201).json(newOrder);
   } catch (error) {
-    console.error("❌ Error creating order:", error.message);
-    res.status(500).json({ error: error.message });
+    console.error("❌ Error creating order:", error);
+    res.status(500).json({ 
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 };
 
