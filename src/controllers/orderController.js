@@ -68,12 +68,19 @@ exports.createOrder = async (req, res) => {
     const deliveryAddress = cleanedBody.deliveryAddress || "";
     const status = cleanedBody.status || "Pending";
 
-    // Get URLs for uploaded files - THIS IS THE CRUCIAL CHANGE
-    const paymentImage = req.files["paymentImage"]?.[0]?.location || null;
-    const avatar = req.files["avatar"]?.[0]?.location || getImageUrl("default-avatar.png");
+    // Get avatar URL (use default if not provided)
+    const avatar = getImageUrl("default-avatar.png");
 
-    // Process product images - THIS IS THE OTHER CRUCIAL CHANGE
-    const productImages = req.files["productImages"]?.map(file => file.location) || [];
+    // Get payment image URL from uploaded files
+    const paymentImage = req.files["paymentImage"] && req.files["paymentImage"][0] 
+      ? getImageUrl(req.files["paymentImage"][0].key) 
+      : null;
+
+    // Get product images URLs from uploaded files
+    let productImages = [];
+    if (req.files["productImages"]) {
+      productImages = req.files["productImages"].map(file => getImageUrl(file.key));
+    }
 
     let orderDetails = [];
     if (cleanedBody.orderDetails) {
@@ -96,7 +103,7 @@ exports.createOrder = async (req, res) => {
               product: item.product,
               quantity: item.quantity || 1,
               price: item.price || 0,
-              productImage: productImages[index] || null, // Now properly gets the uploaded URL
+              productImage: productImages[index] || null, // Use the uploaded image URL
             };
           })
         );
@@ -121,7 +128,7 @@ exports.createOrder = async (req, res) => {
       phoneNumber,
       deliveryAddress,
       avatar,
-      paymentImage, // Now properly gets the uploaded URL
+      paymentImage,
       orderDetails,
       createdAt: new Date(),
     });
