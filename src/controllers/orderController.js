@@ -1,10 +1,11 @@
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const multer = require("multer");
+const { S3Client, DeleteObjectCommand } = require("@aws-sdk/client-s3"); // AWS SDK v3
+const multerS3 = require("multer-s3");
 const path = require("path");
+const multer = require("multer");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 
-// Configure AWS S3 with enhanced error handling
+// Configure AWS S3 (SDK v3)
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
   credentials: {
@@ -13,213 +14,212 @@ const s3 = new S3Client({
   },
 });
 
-// Configure multer with strict validation
-const storage = multer.memoryStorage();
+// Multer configuration for S3 (SDK v3)
 const upload = multer({
-  storage: storage,
+  storage: multerS3({
+    s3: s3,
+    bucket: process.env.AWS_BUCKET_NAME,
+    metadata: (req, file, cb) => {
+      cb(null, { fieldName: file.fieldname });
+    },
+    key: (req, file, cb) => {
+      const ext = path.extname(file.originalname);
+      const fileName = `${Date.now()}${ext}`;
+      cb(null, fileName);
+    },
+    acl: undefined, // Remove ACL configuration
+  }),
   fileFilter: (req, file, cb) => {
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-    if (allowedTypes.includes(file.mimetype)) {
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 
+      'image/bmp', 'image/tiff', 'image/svg+xml', 'image/avif', 
+      'application/octet-stream']; // Add 'application/octet-stream' for AVIF fallback
+    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg', '.webp', '.avif'];
+
+    const ext = path.extname(file.originalname).toLowerCase();
+
+    if (allowedMimeTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error(`Invalid file type: ${file.mimetype}. Only JPEG, PNG, and WEBP are allowed.`), false);
+      cb(new Error(`Unsupported file format: ${file.mimetype} (${ext})`), false);
     }
   },
-  limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit
-    files: 11 // 1 payment + max 10 product images
-  }
 });
 
-// Enhanced S3 upload helper with better error handling
-const uploadToS3 = async (fileBuffer, fileName, mimetype) => {
-  const uploadParams = {
-    Bucket: process.env.AWS_BUCKET_NAME,
-    Key: fileName,
-    Body: fileBuffer,
-    ContentType: mimetype,
-    ACL: 'public-read'
-  };
+// Helper function to get full image URL
+const getImageUrl = (imageName) =>
+  imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
 
+// ✅ Create New Order
+exports.createOrder = async (req, res) => {
   try {
-    await s3.send(new PutObjectCommand(uploadParams));
-    return `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
-  } catch (err) {
-    console.error("S3 Upload Error:", err);
-    throw new Error(`Failed to upload file to S3: ${err.message}`);
-  }
-};
+    const cleanedBody = {};
+    Object.keys(req.body).forEach((key) => {
+      cleanedBody[key.trim()] = req.body[key];
+    });
 
-// Create Order with comprehensive validation
-exports.createOrder = [
-  upload.fields([
-    { name: 'paymentImage', maxCount: 1 },
-    { name: 'productImages', maxCount: 10 }
-  ]),
-  async (req, res) => {
-    try {
-      // Validate required fields
-      const requiredFields = ['userId', 'name', 'phoneNumber', 'deliveryAddress', 'orderDetails'];
-      const missingFields = requiredFields.filter(field => !req.body[field]);
-      
-      if (missingFields.length > 0) {
-        return res.status(400).json({
-          error: "Missing required fields",
-          missingFields
-        });
-      }
+    console.log("📌 Cleaned Request Body:", cleanedBody);
+    console.log("📸 Uploaded Files:", req.files);
 
-      // Process files
-      if (!req.files?.['paymentImage']) {
-        return res.status(400).json({ error: "Payment image is required" });
-      }
+    const userId = cleanedBody.userId || "Unknown ID";
+    const name = cleanedBody.name || "Unknown";
+    const amount = cleanedBody.amount ? parseFloat(cleanedBody.amount) : 0;
+    const phoneNumber = cleanedBody.phoneNumber || "";
+    const deliveryAddress = cleanedBody.deliveryAddress || "";
+    const status = cleanedBody.status || "Pending";
 
-      // Process payment image
-      const paymentFile = req.files['paymentImage'][0];
-      const paymentImageUrl = await uploadToS3(
-        paymentFile.buffer,
-        `payments/${Date.now()}${path.extname(paymentFile.originalname)}`,
-        paymentFile.mimetype
-      );
+    // Upload avatar to S3
+    const avatar = req.files["avatar"]
+      ? getImageUrl(req.files["avatar"][0].key) // Use S3 key to generate URL
+      : getImageUrl("default-avatar.png");
 
-      // Process product images
-      let productImageUrls = [];
-      if (req.files['productImages']) {
-        productImageUrls = await Promise.all(
-          req.files['productImages'].map(async (file, index) => {
-            const url = await uploadToS3(
-              file.buffer,
-              `products/${Date.now()}-${index}${path.extname(file.originalname)}`,
-              file.mimetype
-            );
-            return url;
+    console.log("🖼️ Avatar Path Saved:", avatar);
+
+    // Upload payment image to S3
+    const paymentImage = req.files["paymentImage"]
+      ? getImageUrl(req.files["paymentImage"][0].key) // Use S3 key to generate URL
+      : null;
+
+    // Upload product images to S3
+    const productImages = req.files["productImages"]
+      ? req.files["productImages"].map((file) => getImageUrl(file.key)) // Use S3 key to generate URLs
+      : [];
+
+    let orderDetails = [];
+    if (cleanedBody.orderDetails) {
+      try {
+        orderDetails = JSON.parse(cleanedBody.orderDetails);
+
+        orderDetails = await Promise.all(
+          orderDetails.map(async (item, index) => {
+            const product = await Product.findOne({ name: item.product });
+
+            if (!product) {
+              console.error(`❌ Product not found: ${item.product}`);
+              return null;
+            }
+
+            console.log(`✅ Found Product: ${product.name} - ID: ${product._id}`);
+
+            return {
+              productId: product._id, // ✅ Store actual product ID
+              product: item.product,
+              quantity: item.quantity || 1,
+              price: item.price || 0,
+              productImage: productImages[index] || null, // Use S3 URL
+            };
           })
         );
+
+        orderDetails = orderDetails.filter((item) => item !== null); // Remove null values if any
+      } catch (error) {
+        return res.status(400).json({ error: "Invalid JSON format in orderDetails" });
       }
-
-      // Parse order details
-      const orderDetails = JSON.parse(req.body.orderDetails).map((item, index) => ({
-        productId: item.productId,
-        product: item.product || `Product ${index + 1}`,
-        quantity: item.quantity || 1,
-        price: item.price || 0,
-        productImage: productImageUrls[index] || null
-      }));
-
-      // Create new order
-      const lastOrder = await Order.findOne().sort({ id: -1 });
-      const newOrder = new Order({
-        id: lastOrder ? lastOrder.id + 1 : 1,
-        userId: req.body.userId,
-        name: req.body.name,
-        amount: parseFloat(req.body.amount) || 0,
-        phoneNumber: req.body.phoneNumber,
-        deliveryAddress: req.body.deliveryAddress,
-        status: req.body.status || "Pending",
-        paymentImage: paymentImageUrl,
-        orderDetails,
-        createdAt: new Date()
-      });
-
-      await newOrder.save();
-      res.status(201).json(newOrder);
-    } catch (error) {
-      console.error("Order creation failed:", error);
-      res.status(500).json({ 
-        error: error.message,
-        ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
-      });
     }
-  }
-];
 
-// Get all orders with pagination
-exports.getOrders = async (req, res) => {
-  try {
-    const { page = 1, limit = 10, status } = req.query;
-    const query = status ? { status } : {};
+    console.log("✅ Final Order Details before saving:", orderDetails);
 
-    const orders = await Order.find(query)
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit));
+    const lastOrder = await Order.findOne().sort({ id: -1 });
+    const newId = lastOrder ? lastOrder.id + 1 : 1;
 
-    const total = await Order.countDocuments(query);
-
-    res.json({
-      data: orders,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        totalPages: Math.ceil(total / limit)
-      }
+    const newOrder = new Order({
+      id: newId,
+      userId,
+      name,
+      amount,
+      status,
+      phoneNumber,
+      deliveryAddress,
+      avatar,
+      paymentImage,
+      orderDetails,
+      createdAt: new Date(),
     });
+
+    await newOrder.save();
+    res.status(201).json(newOrder);
   } catch (error) {
+    console.error("❌ Error creating order:", error.message);
     res.status(500).json({ error: error.message });
   }
 };
 
-// Get single order by ID
-exports.getOrderById = async (req, res) => {
-  try {
-    const order = await Order.findOne({ id: req.params.id });
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    res.json(order);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-};
-
-// Update order
+// ✅ Update Order (Now Updates Product Stock & Sold when Delivered)
 exports.updateOrder = async (req, res) => {
   try {
-    const order = await Order.findOneAndUpdate(
-      { id: req.params.id },
-      { ...req.body, updatedAt: new Date() },
-      { new: true, runValidators: true }
-    );
+    const { id } = req.params;
+    const updates = req.body;
+
+    console.log("🔄 Updating Order:", updates);
+
+    const order = await Order.findOneAndUpdate({ id: parseInt(id) }, updates, { new: true });
 
     if (!order) {
-      return res.status(404).json({ error: "Order not found" });
+      return res.status(404).json({ error: "Order not found!" });
     }
 
-    // Update product inventory if status changed to Delivered
-    if (req.body.status === "Delivered") {
-      await Promise.all(
-        order.orderDetails.map(async item => {
-          const product = await Product.findById(item.productId);
-          if (product) {
-            product.stockQuantity -= item.quantity;
-            product.sold += item.quantity;
-            await product.save();
-          }
-        })
-      );
+    // ✅ If status is "Delivered", update product stock & sold values
+    if (updates.status === "Delivered") {
+      for (const item of order.orderDetails) {
+        const product = await Product.findById(item.productId);
+
+        if (product) {
+          product.sold += item.quantity;
+          product.stockQuantity -= item.quantity;
+          await product.save();
+        } else {
+          console.error(`❌ Product not found for ID: ${item.productId}`);
+        }
+      }
     }
 
+    res.status(200).json(order);
+  } catch (error) {
+    console.error("❌ Error updating order:", error.message);
+    res.status(500).json({ error: "Failed to update order." });
+  }
+};
+
+// ✅ Get all Orders
+exports.getOrders = async (req, res) => {
+  try {
+    const orders = await Order.find().select(
+      "id userId name avatar amount status phoneNumber deliveryAddress paymentImage orderDetails createdAt"
+    );
+
+    console.log("📤 Orders Fetched from Database:", JSON.stringify(orders, null, 2));
+
+    res.json(orders);
+  } catch (error) {
+    console.error("❌ Error fetching orders:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ✅ Get Order By ID
+exports.getOrderById = async (req, res) => {
+  try {
+    const order = await Order.findOne({ id: req.params.id }).select(
+      "id userId name avatar amount status phoneNumber deliveryAddress paymentImage orderDetails createdAt"
+    );
+    if (!order) return res.status(404).json({ message: "Order not found" });
     res.json(order);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// Delete single order
+// ✅ Delete Order
 exports.deleteOrder = async (req, res) => {
   try {
-    const order = await Order.findOneAndDelete({ id: req.params.id });
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
+    const deletedOrder = await Order.findOneAndDelete({ id: req.params.id });
+    if (!deletedOrder) return res.status(404).json({ message: "Order not found" });
     res.json({ message: "Order deleted successfully" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// Delete all orders
+// ✅ Delete All Orders
 exports.deleteAllOrders = async (req, res) => {
   try {
     await Order.deleteMany({});
@@ -229,23 +229,25 @@ exports.deleteAllOrders = async (req, res) => {
   }
 };
 
-// Get order by order ID and user ID
+// ✅ Get Order By Order ID and User ID
 exports.getOrderByOrderIdAndUserId = async (req, res) => {
+  const { orderId, userId } = req.params;
+  console.log("Fetching order for:", orderId, userId); // Log the parameters
+
   try {
-    const order = await Order.findOne({ 
-      id: req.params.orderId, 
-      userId: req.params.userId 
-    });
+    const order = await Order.findOne({ id: orderId, userId: userId });
 
     if (!order) {
-      return res.status(404).json({ error: "Order not found" });
+      console.log(`No order found for orderId: ${orderId} and userId: ${userId}`);
+      return res.status(404).json({ message: "Order not found" });
     }
 
-    res.json(order);
+    res.json({ order });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Error retrieving order details:", error);
+    res.status(500).json({ message: "Error retrieving order details" });
   }
 };
 
-// Export upload middleware
-exports.upload = upload;
+// Export the upload middleware
+module.exports.upload = upload;
