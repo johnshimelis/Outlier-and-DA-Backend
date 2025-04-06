@@ -44,49 +44,35 @@ const upload = multer({
   },
 }).fields([
   { name: 'paymentImage', maxCount: 1 },
-  { name: 'productImages', maxCount: 10 },
-  { name: 'avatar', maxCount: 1 }
+  { name: 'productImages', maxCount: 10 }
 ]);
 
 // Helper function to get full image URL
 const getImageUrl = (imageName) =>
   imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
 
-// ✅ Create New Order
+// Create New Order
 exports.createOrder = async (req, res) => {
   try {
-    const cleanedBody = {};
-    Object.keys(req.body).forEach((key) => {
-      cleanedBody[key.trim()] = req.body[key];
-    });
+    console.log("📦 Starting order creation process");
+    console.log("📝 Request body:", req.body);
+    console.log("📸 Uploaded files:", req.files);
 
-    console.log("📌 Cleaned Request Body:", cleanedBody);
-    console.log("📸 Uploaded Files:", req.files);
+    // Process files first
+    let paymentImageUrl = null;
+    if (req.files && req.files['paymentImage'] && req.files['paymentImage'][0]) {
+      paymentImageUrl = req.files['paymentImage'][0].location;
+      console.log("💰 Payment image URL:", paymentImageUrl);
+    }
 
-    const userId = cleanedBody.userId || "Unknown ID";
-    const name = cleanedBody.name || "Unknown";
-    const amount = cleanedBody.amount ? parseFloat(cleanedBody.amount) : 0;
-    const phoneNumber = cleanedBody.phoneNumber || "";
-    const deliveryAddress = cleanedBody.deliveryAddress || "";
-    const status = cleanedBody.status || "Pending";
+    // Process product images
+    let productImageUrls = [];
+    if (req.files && req.files['productImages']) {
+      productImageUrls = req.files['productImages'].map(file => file.location);
+      console.log("🖼️ Product image URLs:", productImageUrls);
+    }
 
-    // Upload avatar to S3
-    const avatar = req.files["avatar"]
-      ? getImageUrl(req.files["avatar"][0].key) // Use S3 key to generate URL
-      : getImageUrl("default-avatar.png");
-
-    console.log("🖼️ Avatar Path Saved:", avatar);
-
-    // Upload payment image to S3
-    const paymentImage = req.files["paymentImage"]
-      ? getImageUrl(req.files["paymentImage"][0].key) // Use S3 key to generate URL
-      : null;
-
-    // Upload product images to S3
-    const productImages = req.files["productImages"]
-      ? req.files["productImages"].map((file) => getImageUrl(file.key)) // Use S3 key to generate URLs
-      : [];
-
+    // Parse order details
     let orderDetails = [];
     if (req.body.orderDetails) {
       try {
@@ -107,20 +93,25 @@ exports.createOrder = async (req, res) => {
       }
     }
 
+    // Validate required fields
+    if (!req.body.userId || !req.body.amount || !paymentImageUrl) {
+      return res.status(400).json({ error: "Missing required fields (userId, amount, or paymentImage)" });
+    }
+
     // Create new order
     const lastOrder = await Order.findOne().sort({ id: -1 });
     const newId = lastOrder ? lastOrder.id + 1 : 1;
 
     const newOrder = new Order({
       id: newId,
-      userId,
-      name,
-      amount,
-      status,
-      phoneNumber,
-      deliveryAddress,
-      avatar,
-      paymentImage,
+      userId: req.body.userId,
+      name: req.body.name || "Unknown",
+      amount: parseFloat(req.body.amount),
+      phoneNumber: req.body.phoneNumber || "",
+      deliveryAddress: req.body.deliveryAddress || "",
+      status: "Pending",
+      paymentImage: paymentImageUrl,
+      avatar: "https://outlier-da.s3.eu-north-1.amazonaws.com/default-avatar.png",
       orderDetails,
       createdAt: new Date()
     });
@@ -136,6 +127,7 @@ exports.createOrder = async (req, res) => {
     });
   }
 };
+
 // ✅ Update Order (Now Updates Product Stock & Sold when Delivered)
 exports.updateOrder = async (req, res) => {
   try {
