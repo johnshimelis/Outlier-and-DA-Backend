@@ -50,80 +50,99 @@ const getImageUrl = (imageName) =>
   imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
 
 // ✅ Create New Order
-// ✅ Create New Order
-// ✅ Create New Order
 exports.createOrder = async (req, res) => {
   try {
-    console.log("📦 Starting order creation process");
-    console.log("📝 Request body:", req.body);
-    console.log("📸 Uploaded files:", req.files);
+    const cleanedBody = {};
+    Object.keys(req.body).forEach((key) => {
+      cleanedBody[key.trim()] = req.body[key];
+    });
 
-    // Process files first
-    let paymentImageUrl = null;
-    if (req.files && req.files['paymentImage'] && req.files['paymentImage'][0]) {
-      paymentImageUrl = req.files['paymentImage'][0].location;
-      console.log("💰 Payment image URL:", paymentImageUrl);
-    }
+    console.log("📌 Cleaned Request Body:", cleanedBody);
+    console.log("📸 Uploaded Files:", req.files);
 
-    // Process product images
-    let productImageUrls = [];
-    if (req.files && req.files['productImages']) {
-      productImageUrls = req.files['productImages'].map(file => file.location);
-      console.log("🖼️ Product image URLs:", productImageUrls);
-    }
+    const userId = cleanedBody.userId || "Unknown ID";
+    const name = cleanedBody.name || "Unknown";
+    const amount = cleanedBody.amount ? parseFloat(cleanedBody.amount) : 0;
+    const phoneNumber = cleanedBody.phoneNumber || "";
+    const deliveryAddress = cleanedBody.deliveryAddress || "";
+    const status = cleanedBody.status || "Pending";
 
-    // Parse order details
+    // Upload avatar to S3
+    const avatar = req.files["avatar"]
+      ? getImageUrl(req.files["avatar"][0].key) // Use S3 key to generate URL
+      : getImageUrl("default-avatar.png");
+
+    console.log("🖼️ Avatar Path Saved:", avatar);
+
+    // Upload payment image to S3
+    const paymentImage = req.files["paymentImage"]
+      ? getImageUrl(req.files["paymentImage"][0].key) // Use S3 key to generate URL
+      : null;
+
+    // Upload product images to S3
+    const productImages = req.files["productImages"]
+      ? req.files["productImages"].map((file) => getImageUrl(file.key)) // Use S3 key to generate URLs
+      : [];
+
     let orderDetails = [];
-    if (req.body.orderDetails) {
+    if (cleanedBody.orderDetails) {
       try {
-        const parsedDetails = typeof req.body.orderDetails === 'string' 
-          ? JSON.parse(req.body.orderDetails) 
-          : req.body.orderDetails;
+        orderDetails = JSON.parse(cleanedBody.orderDetails);
 
-        orderDetails = parsedDetails.map((item, index) => ({
-          productId: item.productId,
-          product: item.product,
-          quantity: item.quantity || 1,
-          price: item.price || 0,
-          productImage: productImageUrls[index] || null
-        }));
+        orderDetails = await Promise.all(
+          orderDetails.map(async (item, index) => {
+            const product = await Product.findOne({ name: item.product });
+
+            if (!product) {
+              console.error(`❌ Product not found: ${item.product}`);
+              return null;
+            }
+
+            console.log(`✅ Found Product: ${product.name} - ID: ${product._id}`);
+
+            return {
+              productId: product._id, // ✅ Store actual product ID
+              product: item.product,
+              quantity: item.quantity || 1,
+              price: item.price || 0,
+              productImage: productImages[index] || null, // Use S3 URL
+            };
+          })
+        );
+
+        orderDetails = orderDetails.filter((item) => item !== null); // Remove null values if any
       } catch (error) {
-        console.error("❌ Error parsing orderDetails:", error);
-        return res.status(400).json({ error: "Invalid orderDetails format" });
+        return res.status(400).json({ error: "Invalid JSON format in orderDetails" });
       }
     }
 
-    // Create new order
+    console.log("✅ Final Order Details before saving:", orderDetails);
+
     const lastOrder = await Order.findOne().sort({ id: -1 });
     const newId = lastOrder ? lastOrder.id + 1 : 1;
 
     const newOrder = new Order({
       id: newId,
-      userId: req.body.userId || "Unknown ID",
-      name: req.body.name || "Unknown",
-      amount: parseFloat(req.body.amount) || 0,
-      phoneNumber: req.body.phoneNumber || "",
-      deliveryAddress: req.body.deliveryAddress || "",
-      status: req.body.status || "Pending",
-      paymentImage: paymentImageUrl,
-      avatar: req.files && req.files['avatar'] && req.files['avatar'][0] 
-        ? req.files['avatar'][0].location 
-        : "https://outlier-da.s3.eu-north-1.amazonaws.com/default-avatar.png",
+      userId,
+      name,
+      amount,
+      status,
+      phoneNumber,
+      deliveryAddress,
+      avatar,
+      paymentImage,
       orderDetails,
-      createdAt: new Date()
+      createdAt: new Date(),
     });
 
     await newOrder.save();
-    console.log("✅ Order created successfully:", newOrder);
     res.status(201).json(newOrder);
   } catch (error) {
-    console.error("❌ Error creating order:", error);
-    res.status(500).json({ 
-      error: error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
+    console.error("❌ Error creating order:", error.message);
+    res.status(500).json({ error: error.message });
   }
 };
+
 // ✅ Update Order (Now Updates Product Stock & Sold when Delivered)
 exports.updateOrder = async (req, res) => {
   try {
