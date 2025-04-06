@@ -1,11 +1,11 @@
-const { S3Client, DeleteObjectCommand } = require("@aws-sdk/client-s3"); // AWS SDK v3
+const { S3Client } = require("@aws-sdk/client-s3");
 const multerS3 = require("multer-s3");
 const path = require("path");
 const multer = require("multer");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 
-// Configure AWS S3 (SDK v3)
+// Configure AWS S3
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
   credentials: {
@@ -14,149 +14,134 @@ const s3 = new S3Client({
   },
 });
 
-// Multer configuration for S3 (SDK v3)
-const upload = multer({
-  storage: multerS3({
-    s3: s3,
-    bucket: process.env.AWS_BUCKET_NAME,
-    metadata: (req, file, cb) => {
-      cb(null, { fieldName: file.fieldname });
-    },
-    key: (req, file, cb) => {
-      const ext = path.extname(file.originalname);
-      const fileName = `${Date.now()}${ext}`;
-      cb(null, fileName);
-    },
-    acl: undefined, // Remove ACL configuration
-  }),
-  fileFilter: (req, file, cb) => {
-    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 
-      'image/bmp', 'image/tiff', 'image/svg+xml', 'image/avif', 
-      'application/octet-stream']; // Add 'application/octet-stream' for AVIF fallback
-    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg', '.webp', '.avif'];
-
-    const ext = path.extname(file.originalname).toLowerCase();
-
-    if (allowedMimeTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`Unsupported file format: ${file.mimetype} (${ext})`), false);
-    }
-  },
-});
-
 // Helper function to get full image URL
 const getImageUrl = (imageName) =>
   imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
 
-// ✅ Create New Order
-// ✅ Create New Order
+// Multer configuration for S3
+const upload = multer({
+  storage: multerS3({
+    s3: s3,
+    bucket: process.env.AWS_BUCKET_NAME,
+    metadata: function (req, file, cb) {
+      cb(null, { fieldName: file.fieldname });
+    },
+    key: function (req, file, cb) {
+      const ext = path.extname(file.originalname);
+      const fileName = `${Date.now()}${ext}`;
+      cb(null, fileName);
+    },
+  }),
+  fileFilter: function (req, file, cb) {
+    const filetypes = /jpeg|jpg|png|gif|webp/;
+    const mimetype = filetypes.test(file.mimetype);
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error('Only image files are allowed!'));
+  },
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  }
+});
+
+// Create New Order
 exports.createOrder = async (req, res) => {
   try {
+    console.log("=== STARTING ORDER CREATION ===");
+    console.log("Request files received:", Object.keys(req.files || {}));
+
+    // 1. Process request body
     const cleanedBody = {};
     Object.keys(req.body).forEach((key) => {
       cleanedBody[key.trim()] = req.body[key];
     });
+    console.log("Cleaned request body:", cleanedBody);
 
-    console.log("📌 Cleaned Request Body:", cleanedBody);
-    console.log("📸 Uploaded Files:", req.files);
-
-    const userId = cleanedBody.userId || "Unknown ID";
-    const name = cleanedBody.name || "Unknown";
-    const amount = cleanedBody.amount ? parseFloat(cleanedBody.amount) : 0;
-    const phoneNumber = cleanedBody.phoneNumber || "";
-    const deliveryAddress = cleanedBody.deliveryAddress || "";
-    const status = cleanedBody.status || "Pending";
-
-    // DEBUG: Log all file keys
-    if (req.files) {
-      console.log("🔍 File keys received:", Object.keys(req.files));
-    }
-
-    // Handle payment image upload - more robust checking
+    // 2. Process payment image (critical fix)
     let paymentImage = null;
-    if (req.files) {
-      // Check for different possible field names
-      if (req.files["paymentImage"] && req.files["paymentImage"][0]) {
-        paymentImage = getImageUrl(req.files["paymentImage"][0].key);
-      } else if (req.files["paymentScreenshot"] && req.files["paymentScreenshot"][0]) {
-        paymentImage = getImageUrl(req.files["paymentScreenshot"][0].key);
-      } else if (req.files["payment"] && req.files["payment"][0]) {
-        paymentImage = getImageUrl(req.files["payment"][0].key);
-      }
+    if (req.files && req.files['paymentImage'] && req.files['paymentImage'][0]) {
+      paymentImage = getImageUrl(req.files['paymentImage'][0].key);
+      console.log("Payment image found and processed:", paymentImage);
+    } else {
+      console.warn("No payment image found in request");
     }
 
-    console.log("💳 Payment Image URL:", paymentImage);
+    // 3. Process product images
+    const productImages = [];
+    if (req.files && req.files['productImages']) {
+      req.files['productImages'].forEach(file => {
+        productImages.push(getImageUrl(file.key));
+      });
+      console.log(`Processed ${productImages.length} product images`);
+    }
 
-    // Handle product images upload
-    const productImages = req.files && req.files["productImages"]
-      ? req.files["productImages"].map((file) => getImageUrl(file.key))
-      : [];
-
-    console.log("🖼️ Product Images URLs:", productImages);
-
+    // 4. Process order details
     let orderDetails = [];
     if (cleanedBody.orderDetails) {
       try {
-        orderDetails = JSON.parse(cleanedBody.orderDetails);
+        const parsedDetails = JSON.parse(cleanedBody.orderDetails);
+        console.log("Raw order details:", parsedDetails);
 
-        orderDetails = await Promise.all(
-          orderDetails.map(async (item, index) => {
-            const product = await Product.findById(item.productId) || 
-                           await Product.findOne({ name: item.product });
+        orderDetails = await Promise.all(parsedDetails.map(async (item, index) => {
+          const product = await Product.findById(item.productId) || 
+                         await Product.findOne({ name: item.product });
 
-            if (!product) {
-              console.error(`❌ Product not found: ${item.product || item.productId}`);
-              return null;
-            }
+          if (!product) {
+            console.warn(`Product not found for item: ${JSON.stringify(item)}`);
+            return null;
+          }
 
-            return {
-              productId: product._id,
-              product: product.name,
-              quantity: item.quantity || 1,
-              price: item.price || product.price || 0,
-              productImage: productImages[index] || item.productImage || product.image || null,
-            };
-          })
-        );
+          return {
+            productId: product._id,
+            product: product.name,
+            quantity: item.quantity || 1,
+            price: item.price || product.price || 0,
+            productImage: productImages[index] || item.productImage || product.image || null,
+          };
+        }));
 
-        orderDetails = orderDetails.filter((item) => item !== null);
+        orderDetails = orderDetails.filter(item => item !== null);
+        console.log("Processed order details:", orderDetails);
       } catch (error) {
-        console.error("❌ Error parsing orderDetails:", error);
-        return res.status(400).json({ error: "Invalid JSON format in orderDetails" });
+        console.error("Error processing order details:", error);
+        return res.status(400).json({ error: "Invalid order details format" });
       }
     }
 
+    // 5. Create order
     const lastOrder = await Order.findOne().sort({ id: -1 });
     const newId = lastOrder ? lastOrder.id + 1 : 1;
 
     const newOrder = new Order({
       id: newId,
-      userId,
-      name,
-      amount,
-      status,
-      phoneNumber,
-      deliveryAddress,
-      paymentImage, // This will now properly include the payment image if it was uploaded
+      userId: cleanedBody.userId,
+      name: cleanedBody.name,
+      amount: parseFloat(cleanedBody.amount) || 0,
+      status: cleanedBody.status || "Pending",
+      phoneNumber: cleanedBody.phoneNumber,
+      deliveryAddress: cleanedBody.deliveryAddress,
+      paymentImage, // This will now be properly set
       orderDetails,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
 
     await newOrder.save();
+    console.log("Order successfully created:", newOrder);
 
-    console.log("🎉 Order created successfully with payment image:", paymentImage);
     res.status(201).json(newOrder);
   } catch (error) {
-    console.error("❌ Error creating order:", error.message);
+    console.error("Order creation failed:", error);
     res.status(500).json({ 
       error: "Failed to create order",
-      details: error.message 
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 };
-
 // ✅ Update Order (Now Updates Product Stock & Sold when Delivered)
 exports.updateOrder = async (req, res) => {
   try {
