@@ -1,4 +1,4 @@
-const { S3Client, DeleteObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, DeleteObjectCommand } = require("@aws-sdk/client-s3"); // AWS SDK v3
 const multerS3 = require("multer-s3");
 const path = require("path");
 const multer = require("multer");
@@ -14,7 +14,7 @@ const s3 = new S3Client({
   },
 });
 
-// Multer configuration for S3 (SDK v3) - UPDATED FILE HANDLING
+// Multer configuration for S3 (SDK v3)
 const upload = multer({
   storage: multerS3({
     s3: s3,
@@ -24,16 +24,15 @@ const upload = multer({
     },
     key: (req, file, cb) => {
       const ext = path.extname(file.originalname);
-      // Changed to include fieldname in the key to prevent conflicts
-      const fileName = `${file.fieldname}-${Date.now()}${ext}`;
+      const fileName = `${Date.now()}${ext}`;
       cb(null, fileName);
     },
-    acl: undefined,
+    acl: undefined, // Remove ACL configuration
   }),
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 
       'image/bmp', 'image/tiff', 'image/svg+xml', 'image/avif', 
-      'application/octet-stream'];
+      'application/octet-stream']; // Add 'application/octet-stream' for AVIF fallback
     const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg', '.webp', '.avif'];
 
     const ext = path.extname(file.originalname).toLowerCase();
@@ -44,32 +43,36 @@ const upload = multer({
       cb(new Error(`Unsupported file format: ${file.mimetype} (${ext})`), false);
     }
   },
-}).fields([
-  { name: 'paymentImage', maxCount: 1 },
-  { name: 'productImages', maxCount: 10 },
-  { name: 'avatar', maxCount: 1 }
-]);
+});
 
-// Helper function to get full image URL - FIXED TYPO IN AWS_REGION
+// Helper function to get full image URL
 const getImageUrl = (imageName) =>
   imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
 
-// ✅ Create New Order (FIXED IMAGE HANDLING)
+// ✅ Create New Order
+// ✅ Create New Order
+// ✅ Create New Order
 exports.createOrder = async (req, res) => {
   try {
     console.log("📦 Starting order creation process");
     console.log("📝 Request body:", req.body);
     console.log("📸 Uploaded files:", req.files);
 
-    // Process files first - IMPROVED NULL CHECKS
-    let paymentImageUrl = req.files?.paymentImage?.[0]?.location || null;
-    console.log("💰 Payment image URL:", paymentImageUrl);
+    // Process files first
+    let paymentImageUrl = null;
+    if (req.files && req.files['paymentImage'] && req.files['paymentImage'][0]) {
+      paymentImageUrl = req.files['paymentImage'][0].location;
+      console.log("💰 Payment image URL:", paymentImageUrl);
+    }
 
-    // Process product images - IMPROVED NULL CHECKS
-    let productImageUrls = req.files?.productImages?.map(file => file.location) || [];
-    console.log("🖼️ Product image URLs:", productImageUrls);
+    // Process product images
+    let productImageUrls = [];
+    if (req.files && req.files['productImages']) {
+      productImageUrls = req.files['productImages'].map(file => file.location);
+      console.log("🖼️ Product image URLs:", productImageUrls);
+    }
 
-    // Parse order details (EXACTLY AS IS)
+    // Parse order details
     let orderDetails = [];
     if (req.body.orderDetails) {
       try {
@@ -90,7 +93,7 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    // Create new order (EXACTLY AS IS)
+    // Create new order
     const lastOrder = await Order.findOne().sort({ id: -1 });
     const newId = lastOrder ? lastOrder.id + 1 : 1;
 
