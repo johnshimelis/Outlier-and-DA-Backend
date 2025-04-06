@@ -50,6 +50,7 @@ const getImageUrl = (imageName) =>
   imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
 
 // ✅ Create New Order
+// ✅ Create New Order
 exports.createOrder = async (req, res) => {
   try {
     const cleanedBody = {};
@@ -67,60 +68,68 @@ exports.createOrder = async (req, res) => {
     const deliveryAddress = cleanedBody.deliveryAddress || "";
     const status = cleanedBody.status || "Pending";
 
-    // Upload avatar to S3
-    const avatar = req.files["avatar"]
-      ? getImageUrl(req.files["avatar"][0].key) // Use S3 key to generate URL
-      : getImageUrl("default-avatar.png");
-
-    console.log("🖼️ Avatar Path Saved:", avatar);
-
-    // Upload payment image to S3
-    const paymentImage = req.files["paymentImage"]
-      ? getImageUrl(req.files["paymentImage"][0].key) // Use S3 key to generate URL
+    // Handle payment image upload
+    const paymentImage = req.files && req.files["paymentImage"] && req.files["paymentImage"][0]
+      ? getImageUrl(req.files["paymentImage"][0].key)
       : null;
 
-    // Upload product images to S3
-    const productImages = req.files["productImages"]
-      ? req.files["productImages"].map((file) => getImageUrl(file.key)) // Use S3 key to generate URLs
+    console.log("💳 Payment Image URL:", paymentImage);
+
+    // Handle product images upload
+    const productImages = req.files && req.files["productImages"]
+      ? req.files["productImages"].map((file) => getImageUrl(file.key))
       : [];
+
+    console.log("🖼️ Product Images URLs:", productImages);
 
     let orderDetails = [];
     if (cleanedBody.orderDetails) {
       try {
         orderDetails = JSON.parse(cleanedBody.orderDetails);
 
+        // Process each order item with its corresponding image
         orderDetails = await Promise.all(
           orderDetails.map(async (item, index) => {
-            const product = await Product.findOne({ name: item.product });
+            // Try to find product by ID first
+            let product = await Product.findById(item.productId);
+            
+            // If not found by ID, try by name (backward compatibility)
+            if (!product && item.product) {
+              product = await Product.findOne({ name: item.product });
+            }
 
             if (!product) {
-              console.error(`❌ Product not found: ${item.product}`);
+              console.error(`❌ Product not found for item:`, item);
               return null;
             }
 
             console.log(`✅ Found Product: ${product.name} - ID: ${product._id}`);
 
             return {
-              productId: product._id, // ✅ Store actual product ID
-              product: item.product,
+              productId: product._id,
+              product: product.name,
               quantity: item.quantity || 1,
-              price: item.price || 0,
-              productImage: productImages[index] || null, // Use S3 URL
+              price: item.price || product.price || 0,
+              productImage: productImages[index] || item.productImage || product.image || null,
             };
           })
         );
 
-        orderDetails = orderDetails.filter((item) => item !== null); // Remove null values if any
+        // Remove any null items (from products not found)
+        orderDetails = orderDetails.filter((item) => item !== null);
+
+        console.log("✅ Final Order Details:", orderDetails);
       } catch (error) {
+        console.error("❌ Error parsing orderDetails:", error);
         return res.status(400).json({ error: "Invalid JSON format in orderDetails" });
       }
     }
 
-    console.log("✅ Final Order Details before saving:", orderDetails);
-
+    // Get the next order ID
     const lastOrder = await Order.findOne().sort({ id: -1 });
     const newId = lastOrder ? lastOrder.id + 1 : 1;
 
+    // Create the new order
     const newOrder = new Order({
       id: newId,
       userId,
@@ -129,17 +138,23 @@ exports.createOrder = async (req, res) => {
       status,
       phoneNumber,
       deliveryAddress,
-      avatar,
       paymentImage,
       orderDetails,
       createdAt: new Date(),
+      updatedAt: new Date(),
     });
 
+    // Save the order
     await newOrder.save();
+
+    console.log("🎉 Order created successfully:", newOrder);
     res.status(201).json(newOrder);
   } catch (error) {
     console.error("❌ Error creating order:", error.message);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: "Failed to create order",
+      details: error.message 
+    });
   }
 };
 
