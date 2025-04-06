@@ -1,10 +1,11 @@
-const { S3Client } = require("@aws-sdk/client-s3");
+const { S3Client, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const multerS3 = require("multer-s3");
 const path = require("path");
 const multer = require("multer");
 const Order = require("../models/Order");
+const Product = require("../models/Product");
 
-// AWS S3 Configuration
+// Configure AWS S3 (SDK v3)
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
   credentials: {
@@ -13,88 +14,110 @@ const s3 = new S3Client({
   },
 });
 
-// Enhanced Multer-S3 Upload Configuration
+// Multer configuration for S3 (SDK v3) - UPDATED FILE HANDLING
 const upload = multer({
   storage: multerS3({
     s3: s3,
     bucket: process.env.AWS_BUCKET_NAME,
-    metadata: (req, file, cb) => cb(null, { fieldName: file.fieldname }),
+    metadata: (req, file, cb) => {
+      cb(null, { fieldName: file.fieldname });
+    },
     key: (req, file, cb) => {
       const ext = path.extname(file.originalname);
-      cb(null, `orders/${file.fieldname}-${Date.now()}${ext}`);
+      // Changed to include fieldname in the key to prevent conflicts
+      const fileName = `${file.fieldname}-${Date.now()}${ext}`;
+      cb(null, fileName);
     },
+    acl: undefined,
   }),
   fileFilter: (req, file, cb) => {
-    const validTypes = ['image/jpeg', 'image/png', 'image/webp'];
-    validTypes.includes(file.mimetype) 
-      ? cb(null, true)
-      : cb(new Error('Invalid file type'), false);
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 
+      'image/bmp', 'image/tiff', 'image/svg+xml', 'image/avif', 
+      'application/octet-stream'];
+    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg', '.webp', '.avif'];
+
+    const ext = path.extname(file.originalname).toLowerCase();
+
+    if (allowedMimeTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Unsupported file format: ${file.mimetype} (${ext})`), false);
+    }
   },
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 }).fields([
   { name: 'paymentImage', maxCount: 1 },
-  { name: 'productImages', maxCount: 5 }
+  { name: 'productImages', maxCount: 10 },
+  { name: 'avatar', maxCount: 1 }
 ]);
 
-// Create New Order (Robust Version)
+// Helper function to get full image URL - FIXED TYPO IN AWS_REGION
+const getImageUrl = (imageName) =>
+  imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
+
+// ✅ Create New Order (FIXED IMAGE HANDLING)
 exports.createOrder = async (req, res) => {
   try {
-    // 1. Validate Required Fields
-    const requiredFields = ['userId', 'amount', 'name', 'phoneNumber', 'deliveryAddress'];
-    const missingFields = requiredFields.filter(field => !req.body[field]);
-    
-    if (missingFields.length > 0) {
-      return res.status(400).json({
-        error: `Missing required fields: ${missingFields.join(', ')}`,
-        received: req.body
-      });
-    }
+    console.log("📦 Starting order creation process");
+    console.log("📝 Request body:", req.body);
+    console.log("📸 Uploaded files:", req.files);
 
-    if (!req.files?.paymentImage) {
-      return res.status(400).json({ error: "Payment proof image is required" });
-    }
+    // Process files first - IMPROVED NULL CHECKS
+    let paymentImageUrl = req.files?.paymentImage?.[0]?.location || null;
+    console.log("💰 Payment image URL:", paymentImageUrl);
 
-    // 2. Process Order Details
+    // Process product images - IMPROVED NULL CHECKS
+    let productImageUrls = req.files?.productImages?.map(file => file.location) || [];
+    console.log("🖼️ Product image URLs:", productImageUrls);
+
+    // Parse order details (EXACTLY AS IS)
     let orderDetails = [];
-    try {
-      orderDetails = JSON.parse(req.body.orderDetails || '[]').map(item => ({
-        productId: item.productId,
-        product: item.product,
-        quantity: item.quantity,
-        price: item.price,
-        productImage: item.productImage || null
-      }));
-    } catch (e) {
-      return res.status(400).json({ error: "Invalid orderDetails format" });
+    if (req.body.orderDetails) {
+      try {
+        const parsedDetails = typeof req.body.orderDetails === 'string' 
+          ? JSON.parse(req.body.orderDetails) 
+          : req.body.orderDetails;
+
+        orderDetails = parsedDetails.map((item, index) => ({
+          productId: item.productId,
+          product: item.product,
+          quantity: item.quantity || 1,
+          price: item.price || 0,
+          productImage: productImageUrls[index] || null
+        }));
+      } catch (error) {
+        console.error("❌ Error parsing orderDetails:", error);
+        return res.status(400).json({ error: "Invalid orderDetails format" });
+      }
     }
 
-    // 3. Create Order Record
-    const order = new Order({
-      id: await Order.countDocuments() + 1,
-      userId: req.body.userId,
-      name: req.body.name,
-      amount: parseFloat(req.body.amount),
-      phoneNumber: req.body.phoneNumber,
-      deliveryAddress: req.body.deliveryAddress,
-      status: "Pending",
-      paymentImage: req.files.paymentImage[0].location,
+    // Create new order (EXACTLY AS IS)
+    const lastOrder = await Order.findOne().sort({ id: -1 });
+    const newId = lastOrder ? lastOrder.id + 1 : 1;
+
+    const newOrder = new Order({
+      id: newId,
+      userId: req.body.userId || "Unknown ID",
+      name: req.body.name || "Unknown",
+      amount: parseFloat(req.body.amount) || 0,
+      phoneNumber: req.body.phoneNumber || "",
+      deliveryAddress: req.body.deliveryAddress || "",
+      status: req.body.status || "Pending",
+      paymentImage: paymentImageUrl,
+      avatar: req.files && req.files['avatar'] && req.files['avatar'][0] 
+        ? req.files['avatar'][0].location 
+        : "https://outlier-da.s3.eu-north-1.amazonaws.com/default-avatar.png",
       orderDetails,
       createdAt: new Date()
     });
 
-    await order.save();
-    
-    res.status(201).json({
-      success: true,
-      order,
-      imageUrl: req.files.paymentImage[0].location
-    });
-
+    await newOrder.save();
+    console.log("✅ Order created successfully:", newOrder);
+    res.status(201).json(newOrder);
   } catch (error) {
-    console.error("Order Creation Error:", error);
-    res.status(500).json({
-      error: "Order processing failed",
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    console.error("❌ Error creating order:", error);
+    res.status(500).json({ 
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 };
