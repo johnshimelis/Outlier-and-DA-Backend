@@ -1,4 +1,4 @@
-const { S3Client, DeleteObjectCommand } = require("@aws-sdk/client-s3"); // AWS SDK v3
+const { S3Client, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const multerS3 = require("multer-s3");
 const path = require("path");
 const multer = require("multer");
@@ -24,15 +24,14 @@ const upload = multer({
     },
     key: (req, file, cb) => {
       const ext = path.extname(file.originalname);
-      const fileName = `${Date.now()}${ext}`;
+      const fileName = `${file.fieldname}-${Date.now()}${ext}`;
       cb(null, fileName);
     },
-    acl: undefined, // Remove ACL configuration
   }),
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 
       'image/bmp', 'image/tiff', 'image/svg+xml', 'image/avif', 
-      'application/octet-stream']; // Add 'application/octet-stream' for AVIF fallback
+      'application/octet-stream'];
     const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg', '.webp', '.avif'];
 
     const ext = path.extname(file.originalname).toLowerCase();
@@ -43,36 +42,51 @@ const upload = multer({
       cb(new Error(`Unsupported file format: ${file.mimetype} (${ext})`), false);
     }
   },
-});
+}).fields([
+  { name: 'paymentImage', maxCount: 1 },
+  { name: 'productImages', maxCount: 10 },
+  { name: 'avatar', maxCount: 1 }
+]);
 
 // Helper function to get full image URL
 const getImageUrl = (imageName) =>
   imageName ? `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${imageName}` : null;
 
 // ✅ Create New Order
-// ✅ Create New Order
-// ✅ Create New Order
 exports.createOrder = async (req, res) => {
   try {
-    console.log("📦 Starting order creation process");
-    console.log("📝 Request body:", req.body);
-    console.log("📸 Uploaded files:", req.files);
+    const cleanedBody = {};
+    Object.keys(req.body).forEach((key) => {
+      cleanedBody[key.trim()] = req.body[key];
+    });
 
-    // Process files first
-    let paymentImageUrl = null;
-    if (req.files && req.files['paymentImage'] && req.files['paymentImage'][0]) {
-      paymentImageUrl = req.files['paymentImage'][0].location;
-      console.log("💰 Payment image URL:", paymentImageUrl);
-    }
+    console.log("📌 Cleaned Request Body:", cleanedBody);
+    console.log("📸 Uploaded Files:", req.files);
 
-    // Process product images
-    let productImageUrls = [];
-    if (req.files && req.files['productImages']) {
-      productImageUrls = req.files['productImages'].map(file => file.location);
-      console.log("🖼️ Product image URLs:", productImageUrls);
-    }
+    const userId = cleanedBody.userId || "Unknown ID";
+    const name = cleanedBody.name || "Unknown";
+    const amount = cleanedBody.amount ? parseFloat(cleanedBody.amount) : 0;
+    const phoneNumber = cleanedBody.phoneNumber || "";
+    const deliveryAddress = cleanedBody.deliveryAddress || "";
+    const status = cleanedBody.status || "Pending";
 
-    // Parse order details
+    // Upload avatar to S3
+    const avatar = req.files["avatar"]
+      ? getImageUrl(req.files["avatar"][0].key) // Use S3 key to generate URL
+      : getImageUrl("default-avatar.png");
+
+    console.log("🖼️ Avatar Path Saved:", avatar);
+
+    // Upload payment image to S3
+    const paymentImage = req.files["paymentImage"]
+      ? getImageUrl(req.files["paymentImage"][0].key) // Use S3 key to generate URL
+      : null;
+
+    // Upload product images to S3
+    const productImages = req.files["productImages"]
+      ? req.files["productImages"].map((file) => getImageUrl(file.key)) // Use S3 key to generate URLs
+      : [];
+
     let orderDetails = [];
     if (req.body.orderDetails) {
       try {
@@ -99,16 +113,14 @@ exports.createOrder = async (req, res) => {
 
     const newOrder = new Order({
       id: newId,
-      userId: req.body.userId || "Unknown ID",
-      name: req.body.name || "Unknown",
-      amount: parseFloat(req.body.amount) || 0,
-      phoneNumber: req.body.phoneNumber || "",
-      deliveryAddress: req.body.deliveryAddress || "",
-      status: req.body.status || "Pending",
-      paymentImage: paymentImageUrl,
-      avatar: req.files && req.files['avatar'] && req.files['avatar'][0] 
-        ? req.files['avatar'][0].location 
-        : "https://outlier-da.s3.eu-north-1.amazonaws.com/default-avatar.png",
+      userId,
+      name,
+      amount,
+      status,
+      phoneNumber,
+      deliveryAddress,
+      avatar,
+      paymentImage,
       orderDetails,
       createdAt: new Date()
     });
