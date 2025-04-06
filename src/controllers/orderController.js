@@ -68,10 +68,23 @@ exports.createOrder = async (req, res) => {
     const deliveryAddress = cleanedBody.deliveryAddress || "";
     const status = cleanedBody.status || "Pending";
 
-    // Handle payment image upload
-    const paymentImage = req.files && req.files["paymentImage"] && req.files["paymentImage"][0]
-      ? getImageUrl(req.files["paymentImage"][0].key)
-      : null;
+    // DEBUG: Log all file keys
+    if (req.files) {
+      console.log("🔍 File keys received:", Object.keys(req.files));
+    }
+
+    // Handle payment image upload - more robust checking
+    let paymentImage = null;
+    if (req.files) {
+      // Check for different possible field names
+      if (req.files["paymentImage"] && req.files["paymentImage"][0]) {
+        paymentImage = getImageUrl(req.files["paymentImage"][0].key);
+      } else if (req.files["paymentScreenshot"] && req.files["paymentScreenshot"][0]) {
+        paymentImage = getImageUrl(req.files["paymentScreenshot"][0].key);
+      } else if (req.files["payment"] && req.files["payment"][0]) {
+        paymentImage = getImageUrl(req.files["payment"][0].key);
+      }
+    }
 
     console.log("💳 Payment Image URL:", paymentImage);
 
@@ -87,23 +100,15 @@ exports.createOrder = async (req, res) => {
       try {
         orderDetails = JSON.parse(cleanedBody.orderDetails);
 
-        // Process each order item with its corresponding image
         orderDetails = await Promise.all(
           orderDetails.map(async (item, index) => {
-            // Try to find product by ID first
-            let product = await Product.findById(item.productId);
-            
-            // If not found by ID, try by name (backward compatibility)
-            if (!product && item.product) {
-              product = await Product.findOne({ name: item.product });
-            }
+            const product = await Product.findById(item.productId) || 
+                           await Product.findOne({ name: item.product });
 
             if (!product) {
-              console.error(`❌ Product not found for item:`, item);
+              console.error(`❌ Product not found: ${item.product || item.productId}`);
               return null;
             }
-
-            console.log(`✅ Found Product: ${product.name} - ID: ${product._id}`);
 
             return {
               productId: product._id,
@@ -115,21 +120,16 @@ exports.createOrder = async (req, res) => {
           })
         );
 
-        // Remove any null items (from products not found)
         orderDetails = orderDetails.filter((item) => item !== null);
-
-        console.log("✅ Final Order Details:", orderDetails);
       } catch (error) {
         console.error("❌ Error parsing orderDetails:", error);
         return res.status(400).json({ error: "Invalid JSON format in orderDetails" });
       }
     }
 
-    // Get the next order ID
     const lastOrder = await Order.findOne().sort({ id: -1 });
     const newId = lastOrder ? lastOrder.id + 1 : 1;
 
-    // Create the new order
     const newOrder = new Order({
       id: newId,
       userId,
@@ -138,16 +138,15 @@ exports.createOrder = async (req, res) => {
       status,
       phoneNumber,
       deliveryAddress,
-      paymentImage,
+      paymentImage, // This will now properly include the payment image if it was uploaded
       orderDetails,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
 
-    // Save the order
     await newOrder.save();
 
-    console.log("🎉 Order created successfully:", newOrder);
+    console.log("🎉 Order created successfully with payment image:", paymentImage);
     res.status(201).json(newOrder);
   } catch (error) {
     console.error("❌ Error creating order:", error.message);
