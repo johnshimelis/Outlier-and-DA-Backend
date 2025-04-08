@@ -15,6 +15,7 @@ const allowedOrigins = [
   "http://localhost:3002", // Add localhost:3001
   "https://pgebeyaadmin.netlify.app",
   "https://pgebeya.netlify.app",
+  "https://daandoutlierservice.netlify.app/",
   
 ];
 
